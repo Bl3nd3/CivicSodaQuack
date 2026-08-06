@@ -33,6 +33,15 @@ Usage:
   csq fetch    (--from <url> | --index <url> [--snapshot <id>]) [--output <path>] [--no-verify] [--force]
   csq snapshot-index update --index <path> --add <tarball> --url <url> [--max-keep N]
   csq snapshot-index validate --index <path>
+  csq modes    [show|init|run] <mode> [options]
+
+Modes — curated analysis profiles, ready to sync and query:
+  corruption   Contract concentration, lobbying spend, and political contributions
+  ranking      Rank attached portals by breadth, subject coverage, and freshness
+  police       Complaints against police, oversight findings, and how they resolve
+
+  Start with 'csq modes' to list them, or 'csq modes show <mode>' for the
+  datasets, queries, and interpretation caveats each one carries.
 
 All subcommands except 'fetch' acquire <dbpath>.lock (advisory flock).
 Pass --no-lock to bypass or --lock-wait <duration> to retry.
@@ -45,6 +54,9 @@ Examples:
   csq mcp      --db data.cityofchicago.org.duckdb --config data.cityofchicago.org.yaml
   csq snapshot --db data.cityofchicago.org.duckdb --output chicago-2026-04-28.tar.zst
   csq fetch    --from https://example.com/snapshots/chicago-2026-04-28.tar.zst
+  csq modes    show police
+  csq modes    init police --output police.yaml
+  csq modes    run  police --db data.cityofchicago.org.duckdb --query finding-outcomes
 `
 
 func main() {
@@ -86,6 +98,11 @@ func main() {
 	case "snapshot-index":
 		if err := runSnapshotIndex(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "csq snapshot-index: %v\n", err)
+			os.Exit(1)
+		}
+	case "modes", "mode":
+		if err := runModes(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "csq modes: %v\n", err)
 			os.Exit(1)
 		}
 	case "-h", "--help", "help":
