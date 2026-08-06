@@ -31,6 +31,10 @@ const (
 	PlaceholderCatalog = "{{CATALOG}}"
 	// PlaceholderSyncRuns expands to a unioned _csq.sync_runs across all portals.
 	PlaceholderSyncRuns = "{{SYNCRUNS}}"
+	// PlaceholderAliases expands to a quoted, comma-separated alias list, for
+	// scoping engine metadata functions such as duckdb_columns() — which span
+	// every attached database — to just the portals the user asked for.
+	PlaceholderAliases = "{{ALIASES}}"
 )
 
 // Dataset is one Socrata dataset a mode wants synced.
@@ -80,6 +84,7 @@ var registry = []*Mode{
 	corruptionMode,
 	rankingMode,
 	policeMode,
+	researchMode,
 }
 
 // All returns every registered mode, ordered for display.
@@ -153,6 +158,13 @@ func Expand(sql string, aliases []string) (string, error) {
 	}
 	if strings.Contains(sql, PlaceholderSyncRuns) {
 		sql = strings.ReplaceAll(sql, PlaceholderSyncRuns, unionAll(aliases, "_csq.sync_runs"))
+	}
+	if strings.Contains(sql, PlaceholderAliases) {
+		quoted := make([]string, 0, len(aliases))
+		for _, a := range aliases {
+			quoted = append(quoted, "'"+a+"'")
+		}
+		sql = strings.ReplaceAll(sql, PlaceholderAliases, strings.Join(quoted, ", "))
 	}
 	return sql, nil
 }

@@ -40,6 +40,7 @@ Modes are curated analysis profiles: for a given civic question, the datasets wo
 | `corruption` | single portal | Contract concentration by vendor and department, procurement-type mix, lobbyist compensation, contribution recipients, and the overlap between the two |
 | `ranking` | cross-portal | Comparison of portal breadth, category coverage, how much you hold locally, and freshness |
 | `police` | single portal | Civilian oversight — COPA/BIA complaint volume, finding and category outcomes, complainant demographics, officer tenure, shootings, beat distribution |
+| `research` | cross-portal | Provenance for citation, failed-run and coverage gaps, schema inventory, candidate join keys, and generated data-quality checks |
 
 For a mode with datasets, generate a config and sync it, then run the queries:
 
@@ -50,11 +51,20 @@ For a mode with datasets, generate a config and sync it, then run the queries:
 ./csq modes run police --db data.cityofchicago.org.duckdb --query finding-outcomes
 ```
 
-`ranking` has no datasets of its own — it reads the `_csq` bookkeeping schema that every csq database carries, so point it at ones you already built:
+`ranking` and `research` have no datasets of their own — they read the `_csq` bookkeeping schema that every csq database carries, so point them at ones you already built:
 
 ```bash
-./csq modes run ranking --db chicago.duckdb --db cookcounty.duckdb
+./csq modes run ranking  --db chicago.duckdb --db cookcounty.duckdb
+./csq modes run research --db chicago.duckdb --db cookcounty.duckdb
 ```
+
+`research` is the due-diligence pass that belongs *before* an analysis. It records provenance for citation (which datasets, when, which config hash), surfaces failed runs and the gap between what a portal publishes and what you pulled, and profiles the corpus — schema inventory, candidate join keys, and every date column that needs range-checking. Two of its queries emit SQL rather than guessing at numbers they cannot compute in a single pass:
+
+```bash
+./csq modes run research --db cookcounty.duckdb --query date-range-sql --quiet
+```
+
+Running the statements that produces against the Cook County corpus reports a `sentence_date` reaching the year **2921** and an `arrest_date` starting in **1915** — the kind of upstream defect that silently ruins a time series. Read generated SQL before running it, as you would any generated code.
 
 `modes run` attaches every portal `READ_ONLY`, so it composes with a running `csq mcp` or `csq sync` holding the same file instead of contending for the write lock.
 

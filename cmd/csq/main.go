@@ -39,6 +39,7 @@ Modes — curated analysis profiles, ready to sync and query:
   corruption   Contract concentration, lobbying spend, and political contributions
   ranking      Rank attached portals by breadth, subject coverage, and freshness
   police       Complaints against police, oversight findings, and how they resolve
+  research     Audit what you hold, where it came from, and which columns to distrust
 
   Start with 'csq modes' to list them, or 'csq modes show <mode>' for the
   datasets, queries, and interpretation caveats each one carries.

@@ -66,7 +66,8 @@ func TestQueryPlaceholdersMatchScope(t *testing.T) {
 		for _, q := range m.Queries {
 			hasSingle := strings.Contains(q.SQL, PlaceholderPortal)
 			hasUnion := strings.Contains(q.SQL, PlaceholderCatalog) ||
-				strings.Contains(q.SQL, PlaceholderSyncRuns)
+				strings.Contains(q.SQL, PlaceholderSyncRuns) ||
+				strings.Contains(q.SQL, PlaceholderAliases)
 
 			if m.MultiPortal && hasSingle {
 				t.Errorf("mode %q query %q: cross-portal mode uses %s",
@@ -174,6 +175,16 @@ func TestAliasFor(t *testing.T) {
 		if got := AliasFor(in); got != want {
 			t.Errorf("AliasFor(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestExpandAliasList(t *testing.T) {
+	got, err := Expand("WHERE database_name IN ({{ALIASES}})", []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("Expand: %v", err)
+	}
+	if want := "WHERE database_name IN ('a', 'b')"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
