@@ -26,6 +26,45 @@ go build -o csq ./cmd/csq
 
 Set `SOCRATA_APP_TOKEN` (referenced in the YAML as `${SOCRATA_APP_TOKEN}`) to lift anonymous rate limits.
 
+### Modes
+
+Modes are curated analysis profiles: for a given civic question, the datasets worth syncing, the SQL that turns them into an answer, and the caveats that keep the answer honest. Running `csq` with no arguments lists them.
+
+```bash
+./csq modes                    # list
+./csq modes show corruption    # datasets, queries, and caveats
+```
+
+| Mode | Scope | What it covers |
+| --- | --- | --- |
+| `corruption` | single portal | Contract concentration by vendor and department, procurement-type mix, lobbyist compensation, contribution recipients, and the overlap between the two |
+| `ranking` | cross-portal | Comparison of portal breadth, category coverage, how much you hold locally, and freshness |
+| `police` | single portal | Civilian oversight — COPA/BIA complaint volume, finding and category outcomes, complainant demographics, officer tenure, shootings, beat distribution |
+
+For a mode with datasets, generate a config and sync it, then run the queries:
+
+```bash
+./csq modes init police --output police.yaml
+./csq sync --config police.yaml
+./csq modes run police --db data.cityofchicago.org.duckdb
+./csq modes run police --db data.cityofchicago.org.duckdb --query finding-outcomes
+```
+
+`ranking` has no datasets of its own — it reads the `_csq` bookkeeping schema that every csq database carries, so point it at ones you already built:
+
+```bash
+./csq modes run ranking --db chicago.duckdb --db cookcounty.duckdb
+```
+
+`modes run` attaches every portal `READ_ONLY`, so it composes with a running `csq mcp` or `csq sync` holding the same file instead of contending for the write lock.
+
+Each mode carries interpretation caveats, printed by `modes show`, printed above `modes run` output, and embedded as comments in the YAML that `modes init` writes. They are a structural requirement — a test fails the build if a mode declares none. Contract concentration is frequently legitimate (specialised work may have one qualified bidder), and an unsustained complaint is not a false one; a tool reporting on procurement and policing should say so where the numbers are. Two scope limits worth stating up front:
+
+- **`ranking` compares open-data transparency, not livability or governance.** Outcome-based city ranking would need population denominators and a mapping between incompatible per-city schemas, neither of which csq has.
+- **`police` is civilian-side oversight only**, reading accountability records about the department. Chicago's published COPA and BIA extracts carry no officer identifier, so repeat-officer analysis is not possible with them; arrest volume is included solely as a denominator for complaint rates.
+
+Adding a mode means appending to the registry in `internal/modes/`, not touching the CLI.
+
 ### Serve via MCP
 
 ```bash
@@ -171,6 +210,7 @@ internal/config/      # YAML loader + per-dataset effective config
 internal/sync/        # Sync orchestrator + strategies (FullReplace, Incremental)
 internal/mcpserver/   # MCP server: pools, ATTACH, tools, transports
 internal/snapshot/    # Snapshot publishing: tar+zst format, Pack producer, Fetch consumer
+internal/modes/       # Curated analysis profiles: datasets, queries, caveats
 ```
 
 ## License
