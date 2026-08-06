@@ -68,10 +68,11 @@ Running the statements that produces against the Cook County corpus reports a `s
 
 `modes run` attaches every portal `READ_ONLY`, so it composes with a running `csq mcp` or `csq sync` holding the same file instead of contending for the write lock.
 
-Each mode carries interpretation caveats, printed by `modes show`, printed above `modes run` output, and embedded as comments in the YAML that `modes init` writes. They are a structural requirement — a test fails the build if a mode declares none. Contract concentration is frequently legitimate (specialised work may have one qualified bidder), and an unsustained complaint is not a false one; a tool reporting on procurement and policing should say so where the numbers are. Two scope limits worth stating up front:
+Each mode carries interpretation caveats, printed by `modes show`, printed above `modes run` output, and embedded as comments in the YAML that `modes init` writes. They are a structural requirement — a test fails the build if a mode declares none. Contract concentration is frequently legitimate (specialised work may have one qualified bidder), and an unsustained complaint is not a false one; a tool reporting on procurement and policing should say so where the numbers are. Three scope limits worth stating up front:
 
 - **`ranking` compares open-data transparency, not livability or governance.** Outcome-based city ranking would need population denominators and a mapping between incompatible per-city schemas, neither of which csq has.
 - **`police` is civilian-side oversight only**, reading accountability records about the department. Chicago's published COPA and BIA extracts carry no officer identifier, so repeat-officer analysis is not possible with them; arrest volume is included solely as a denominator for complaint rates.
+- **A recent sync does not mean recent data.** csq records when *it* last pulled a dataset, not when the city last updated it, so a dataset frozen upstream for years still reports a sync from this morning. `research --query provenance` shows sync time only. Check the portal's own metadata before describing anything as current — the five Cook County State's Attorney datasets in `datacatalog.cookcountyil.gov.yaml` are a live example: frozen on 2024-12-30, covering through 2024-11-30, and syncing cleanly today.
 
 Adding a mode means appending to the registry in `internal/modes/`, not touching the CLI.
 
