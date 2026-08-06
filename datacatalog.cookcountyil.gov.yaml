@@ -1,0 +1,44 @@
+portal: datacatalog.cookcountyil.gov
+# Uncomment once SOCRATA_APP_TOKEN is exported; anonymous works but is
+# rate-limited, which matters for the ~3.2M rows below.
+# app_token: ${SOCRATA_APP_TOKEN}
+concurrency: 4
+on_error: continue
+
+defaults:
+  batch_size: 10000
+  order_by: ":id"
+
+# Cook County State's Attorney felony case pipeline, in process order:
+#   intake -> initiation -> dispositions -> sentencing, with diversion as the
+#   off-ramp. Join on case_id + case_participant_id (a case has many
+#   participants; a participant has many charges).
+#
+# All five were frozen by the SAO on 2024-12-30 and are no longer updated;
+# coverage runs 2011-01-01 to 2024-11-30. They are therefore synced as
+# full_replace: the rows are mutable (a charge's disposition and sentence are
+# revised as a case moves through court) and republished wholesale, so an
+# incremental append keyed on :updated_at would accumulate stale duplicates.
+include:
+  - id: 3k7z-hchi    # Intake        ~528k rows
+  - id: 7mck-ehwz    # Initiation    ~1.23M rows
+  - id: apwk-dzx8    # Dispositions  ~1.08M rows
+  - id: tg8v-tm6u    # Sentencing    ~306k rows
+  - id: gpu3-5dfh    # Diversion     ~29k rows
+
+overrides:
+  3k7z-hchi:
+    table: intake
+    mode: full_replace
+  7mck-ehwz:
+    table: initiation
+    mode: full_replace
+  apwk-dzx8:
+    table: dispositions
+    mode: full_replace
+  tg8v-tm6u:
+    table: sentencing
+    mode: full_replace
+  gpu3-5dfh:
+    table: diversion
+    mode: full_replace
