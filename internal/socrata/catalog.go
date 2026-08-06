@@ -21,9 +21,31 @@ type CatalogEntry struct {
 	Tags        []string
 	// RowCount is left nil in Phase 1: Socrata's /api/catalog/v1 does not
 	// reliably expose row counts across portals. Callers should tolerate nil.
-	RowCount  *int64
+	RowCount *int64
+	// UpdatedAt is when the dataset's *data* last changed upstream, taken from
+	// data_updated_at. It deliberately ignores metadata_updated_at: a portal's
+	// `updatedAt` is max(data, metadata), so an edit to a description makes a
+	// dataset frozen for years look current. Nil when the portal reports none
+	// of the candidate fields.
 	UpdatedAt *time.Time
 	Raw       json.RawMessage
+}
+
+// parseCatalogTimestamp returns the first candidate that parses under any known
+// layout, so callers can express field precedence by argument order. Returns
+// nil when every candidate is empty or unparseable.
+func parseCatalogTimestamp(candidates ...string) *time.Time {
+	for _, s := range candidates {
+		if s == "" {
+			continue
+		}
+		for _, layout := range catalogTimestampLayouts {
+			if t, err := time.Parse(layout, s); err == nil {
+				return &t
+			}
+		}
+	}
+	return nil
 }
 
 var catalogTimestampLayouts = []string{
@@ -74,9 +96,15 @@ func (c *Client) fetchCatalogScheme(portal, scheme string) ([]CatalogEntry, erro
 
 type rawCatalogEntry struct {
 	Resource struct {
-		ID            string `json:"id"`
-		Name          string `json:"name"`
-		Description   string `json:"description"`
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		// DataUpdatedAt is what /api/catalog/v1 actually returns for data
+		// freshness. UpdatedAt is a fallback for portals that omit it, and
+		// RowsUpdatedAt is the field name used by /api/views/{id}.json — kept
+		// so a caller feeding this struct a views payload still resolves.
+		DataUpdatedAt string `json:"data_updated_at"`
+		UpdatedAt     string `json:"updatedAt"`
 		RowsUpdatedAt string `json:"rowsUpdatedAt"`
 	} `json:"resource"`
 	Classification struct {
@@ -132,14 +160,11 @@ func (c *Client) getCatalogPage(fullURL string) ([]CatalogEntry, int, error) {
 			Tags:        r.Classification.DomainTags,
 			Raw:         raw,
 		}
-		if r.Resource.RowsUpdatedAt != "" {
-			for _, layout := range catalogTimestampLayouts {
-				if t, err := time.Parse(layout, r.Resource.RowsUpdatedAt); err == nil {
-					e.UpdatedAt = &t
-					break
-				}
-			}
-		}
+		e.UpdatedAt = parseCatalogTimestamp(
+			r.Resource.DataUpdatedAt,
+			r.Resource.UpdatedAt,
+			r.Resource.RowsUpdatedAt,
+		)
 		entries = append(entries, e)
 	}
 	return entries, cr.ResultSetSize, nil
