@@ -86,7 +86,7 @@ func TestDescribeDataset_AmbiguousAcrossPortals(t *testing.T) {
 		FixtureDataset{ID: "aaaa-0001", Name: "A's crimes"})
 	b := seedFixtureDB(t, dir, "b.duckdb",
 		FixtureDataset{ID: "aaaa-0001", Name: "B's crimes"})
-	pools, err := OpenPools([]DBSpec{{Alias: "a", Path: a}, {Alias: "b", Path: b}})
+	pools, err := OpenPools([]DBSpec{{Alias: "a", Path: a}, {Alias: "b", Path: b}}, nil)
 	if err != nil {
 		t.Fatalf("OpenPools: %v", err)
 	}

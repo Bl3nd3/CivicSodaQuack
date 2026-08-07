@@ -34,6 +34,7 @@ Usage:
   csq snapshot-index update --index <path> --add <tarball> --url <url> [--max-keep N]
   csq snapshot-index validate --index <path>
   csq modes    [show|init|run] <mode> [options]
+  csq query    --db <portal.duckdb> [--db ...] [--format csv|json|parquet] <SQL>
 
 Modes — curated analysis profiles, ready to sync and query:
   corruption   Contract concentration, lobbying spend, and political contributions
@@ -104,6 +105,11 @@ func main() {
 	case "modes", "mode":
 		if err := runModes(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "csq modes: %v\n", err)
+			os.Exit(1)
+		}
+	case "query":
+		if err := runQuery(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "csq query: %v\n", err)
 			os.Exit(1)
 		}
 	case "-h", "--help", "help":

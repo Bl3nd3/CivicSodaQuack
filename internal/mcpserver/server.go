@@ -32,7 +32,15 @@ type Options struct {
 // chosen transport. Blocks until the context is cancelled or the transport
 // returns. Pools are closed before returning.
 func Serve(ctx context.Context, opts Options) error {
-	pools, err := OpenPools(opts.DBs)
+	// Only portals with a registered config need write access: their write
+	// tools reopen the same path in-process, and DuckDB will not hold one file
+	// at two access modes. Everything else is opened read-only so a concurrent
+	// sync or a second reader is not locked out.
+	writable := make(map[string]bool, len(opts.Configs))
+	for alias := range opts.Configs {
+		writable[alias] = true
+	}
+	pools, err := OpenPools(opts.DBs, writable)
 	if err != nil {
 		return err
 	}

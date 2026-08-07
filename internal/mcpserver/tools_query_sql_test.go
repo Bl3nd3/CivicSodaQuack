@@ -102,7 +102,7 @@ func TestQuerySQL_CrossPortal(t *testing.T) {
 			TableName: "items", ColumnDefs: []string{"id VARCHAR"},
 			Rows: []map[string]any{{"id": "x"}},
 		})
-	pools, err := OpenPools([]DBSpec{{Alias: "a", Path: a}, {Alias: "b", Path: b}})
+	pools, err := OpenPools([]DBSpec{{Alias: "a", Path: a}, {Alias: "b", Path: b}}, nil)
 	if err != nil {
 		t.Fatalf("OpenPools: %v", err)
 	}

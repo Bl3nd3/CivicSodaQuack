@@ -17,7 +17,7 @@ func TestServe_RegistersFourTools(t *testing.T) {
 	dir := t.TempDir()
 	path := seedFixtureDB(t, dir, "test.duckdb",
 		FixtureDataset{ID: "aaaa-0001", Name: "X"})
-	pools, err := OpenPools([]DBSpec{{Alias: "test", Path: path}})
+	pools, err := OpenPools([]DBSpec{{Alias: "test", Path: path}}, nil)
 	if err != nil {
 		t.Fatalf("OpenPools: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestServe_HTTPSmoke(t *testing.T) {
 	defer cancel()
 
 	// Run Serve on an in-process httptest server.
-	pools, err := OpenPools([]DBSpec{{Alias: "test", Path: path}})
+	pools, err := OpenPools([]DBSpec{{Alias: "test", Path: path}}, nil)
 	if err != nil {
 		t.Fatalf("OpenPools: %v", err)
 	}

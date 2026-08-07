@@ -13,7 +13,7 @@ func openFixturePools(t *testing.T, datasets ...FixtureDataset) (*Pools, func())
 	t.Helper()
 	dir := t.TempDir()
 	path := seedFixtureDB(t, dir, "test.duckdb", datasets...)
-	pools, err := OpenPools([]DBSpec{{Alias: "test", Path: path}})
+	pools, err := OpenPools([]DBSpec{{Alias: "test", Path: path}}, nil)
 	if err != nil {
 		t.Fatalf("OpenPools: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestListDatasets_TwoPortals(t *testing.T) {
 		FixtureDataset{ID: "aaaa-0001", Name: "A1"})
 	b := seedFixtureDB(t, dir, "b.duckdb",
 		FixtureDataset{ID: "bbbb-0002", Name: "B1"})
-	pools, err := OpenPools([]DBSpec{{Alias: "a", Path: a}, {Alias: "b", Path: b}})
+	pools, err := OpenPools([]DBSpec{{Alias: "a", Path: a}, {Alias: "b", Path: b}}, nil)
 	if err != nil {
 		t.Fatalf("OpenPools: %v", err)
 	}
