@@ -4,7 +4,9 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,23 +61,65 @@ func TestListDatasets_OnePortal(t *testing.T) {
 	if d.RowCount == nil || *d.RowCount != 2 {
 		t.Errorf("rowcount: got %v, want 2", d.RowCount)
 	}
-	if d.TableName != "aaaa_0001" {
-		t.Errorf("table_name: got %q", d.TableName)
+	if d.TableName == nil || *d.TableName != "aaaa_0001" {
+		t.Errorf("table_name: got %v, want aaaa_0001", d.TableName)
+	}
+	if !d.Synced {
+		t.Error("synced should be true for a successfully synced dataset")
 	}
 }
 
-func TestListDatasets_NeverSynced_RowCountNil(t *testing.T) {
+// TestListDatasets_NeverSynced_ReportsNoTable is the regression test for P1-2.
+// A catalog entry with no successful sync has no table, and the response must
+// say so: a synthesised name is indistinguishable from a real one to a consumer
+// and turns a discovery-time fact into a query-time error. The previous version
+// of this test asserted the synthesised name was correct, which is how the
+// behaviour survived.
+func TestListDatasets_NeverSynced_ReportsNoTable(t *testing.T) {
 	pools, cleanup := openFixturePools(t,
 		FixtureDataset{ID: "aaaa-0001", Name: "Crimes", Category: "Safety", Synced: false})
 	defer cleanup()
 
-	got, _ := listDatasetsHandler(context.Background(), pools, ListDatasetsArgs{})
-	if len(got) != 1 || got[0].RowCount != nil {
-		t.Errorf("RowCount should be nil for un-synced dataset; got %+v", got)
+	got, err := listDatasetsHandler(context.Background(), pools, ListDatasetsArgs{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
 	}
-	// Fallback table name from id
-	if got[0].TableName != "aaaa_0001" {
-		t.Errorf("fallback table_name wrong: %q", got[0].TableName)
+	if len(got) != 1 {
+		t.Fatalf("want 1 dataset, got %d", len(got))
+	}
+	if got[0].RowCount != nil {
+		t.Errorf("row_count should be nil for an unsynced dataset; got %v", *got[0].RowCount)
+	}
+	if got[0].TableName != nil {
+		t.Errorf("table_name must be nil for an unsynced dataset; got %q "+
+			"(a fabricated name invites the consumer to query a table that does not exist)",
+			*got[0].TableName)
+	}
+	if got[0].Synced {
+		t.Error("synced should be false for a dataset with no successful sync")
+	}
+}
+
+// TestListDatasets_UnsyncedTableNameIsNullInJSON pins the wire format, not just
+// the Go value: the field must be present and null so a consumer sees the
+// absence, rather than omitted where it could be mistaken for an oversight.
+func TestListDatasets_UnsyncedTableNameIsNullInJSON(t *testing.T) {
+	pools, cleanup := openFixturePools(t,
+		FixtureDataset{ID: "aaaa-0001", Name: "Crimes", Synced: false})
+	defer cleanup()
+
+	got, err := listDatasetsHandler(context.Background(), pools, ListDatasetsArgs{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	b, err := json.Marshal(got[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"table_name":null`, `"row_count":null`, `"synced":false`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("payload missing %s\ngot: %s", want, b)
+		}
 	}
 }
 

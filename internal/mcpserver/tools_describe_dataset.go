@@ -167,12 +167,11 @@ func loadDetail(ctx context.Context, p *Pools, alias, id string) (DatasetDetail,
 			n := rowsWritten.Int64
 			d.RowCount = &n
 		}
-		if tableName.Valid {
-			d.TableName = tableName.String
+		if tableName.Valid && tableName.String != "" {
+			t := tableName.String
+			d.TableName = &t
+			d.Synced = true
 		}
-	}
-	if d.TableName == "" {
-		d.TableName = strings.ReplaceAll(id, "-", "_")
 	}
 
 	// HWM
@@ -187,12 +186,17 @@ func loadDetail(ctx context.Context, p *Pools, alias, id string) (DatasetDetail,
 		d.HWMUpdatedAt = &t
 	}
 
-	// Columns from information_schema, excluding socrata_id
-	cols, err := readColumns(ctx, pool, d.TableName)
-	if err != nil {
-		return d, err
+	// Columns from information_schema, excluding socrata_id. An unsynced
+	// dataset has no table to describe, so report an empty column list rather
+	// than probing a name that was never created.
+	d.Columns = []ColumnInfo{}
+	if d.TableName != nil {
+		cols, err := readColumns(ctx, pool, *d.TableName)
+		if err != nil {
+			return d, err
+		}
+		d.Columns = cols
 	}
-	d.Columns = cols
 
 	return d, nil
 }

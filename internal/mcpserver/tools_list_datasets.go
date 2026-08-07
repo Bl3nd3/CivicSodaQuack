@@ -17,13 +17,21 @@ type ListDatasetsArgs struct {
 }
 
 // DatasetSummary is one row in list_datasets / search_datasets results.
+//
+// A catalog entry is not a queryable table: a portal DuckDB can list thousands
+// of datasets it has never synced. Synced says which is which, and TableName is
+// null unless a successful sync produced a real table — never a plausible name
+// derived from the id, which invites a consumer to query something that does
+// not exist. RowCount is likewise emitted as null rather than omitted, so its
+// absence is visible instead of inferred.
 type DatasetSummary struct {
-	DatasetID string `json:"dataset_id"`
-	Portal    string `json:"portal"`
-	Name      string `json:"name"`
-	Category  string `json:"category,omitempty"`
-	TableName string `json:"table_name"`
-	RowCount  *int64 `json:"row_count,omitempty"`
+	DatasetID string  `json:"dataset_id"`
+	Portal    string  `json:"portal"`
+	Name      string  `json:"name"`
+	Category  string  `json:"category,omitempty"`
+	Synced    bool    `json:"synced"`
+	TableName *string `json:"table_name"`
+	RowCount  *int64  `json:"row_count"`
 }
 
 // listDatasetsHandler enumerates datasets across the requested portal (or all
@@ -77,8 +85,8 @@ func selectPortals(p *Pools, requested string) []string {
 }
 
 // queryDatasetsForPortal returns all dataset summaries from one portal pool.
-// table_name and row_count come from the most recent status='ok' sync_runs row;
-// if no successful sync exists, table_name falls back to replace(id, '-', '_').
+// table_name and row_count come from the most recent status='ok' sync_runs row.
+// With no successful sync both stay null and synced is false.
 func queryDatasetsForPortal(ctx context.Context, db *sql.DB, alias string) ([]DatasetSummary, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT c.id, c.name, COALESCE(c.category, ''), s.table_name, s.rows_written
@@ -111,10 +119,13 @@ func queryDatasetsForPortal(ctx context.Context, db *sql.DB, alias string) ([]Da
 			Name:      name,
 			Category:  category,
 		}
-		if table.Valid {
-			summary.TableName = table.String
-		} else {
-			summary.TableName = strings.ReplaceAll(id, "-", "_")
+		// Only a successful sync yields a real table. Anything else stays null:
+		// a synthesised name here is indistinguishable from a real one to the
+		// consumer, and fails at query time instead of at discovery time.
+		if table.Valid && table.String != "" {
+			t := table.String
+			summary.TableName = &t
+			summary.Synced = true
 		}
 		if rowCount.Valid {
 			n := rowCount.Int64
