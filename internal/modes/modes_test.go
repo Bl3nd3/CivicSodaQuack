@@ -45,61 +45,57 @@ func TestRegistryIntegrity(t *testing.T) {
 			qseen[q.Name] = true
 		}
 
-		tseen := map[string]bool{}
-		for _, d := range m.Datasets {
-			if d.ID == "" || d.Table == "" || d.Name == "" || d.Why == "" {
-				t.Errorf("mode %q: dataset %q is incomplete", m.Name, d.ID)
+		cseen := map[string]bool{}
+		for _, c := range m.Concepts {
+			if c.Name == "" || c.Purpose == "" {
+				t.Errorf("mode %q: concept %q is incomplete", m.Name, c.Name)
 			}
-			if tseen[d.Table] {
-				t.Errorf("mode %q: duplicate table name %q", m.Name, d.Table)
+			if cseen[c.Name] {
+				t.Errorf("mode %q: duplicate concept %q", m.Name, c.Name)
 			}
-			tseen[d.Table] = true
+			cseen[c.Name] = true
 		}
 	}
 }
 
-// TestQueryPlaceholdersMatchScope ensures single-portal modes use {{P}} and
-// cross-portal modes use the union placeholders — mixing them yields SQL that
-// cannot be expanded.
+// TestQueryPlaceholdersMatchScope ensures each query carries a placeholder its
+// mode can actually expand: concept refs for concept-based modes, union
+// placeholders for cross-portal ones. Mixing them yields SQL that will not
+// resolve at run time.
 func TestQueryPlaceholdersMatchScope(t *testing.T) {
 	for _, m := range All() {
 		for _, q := range m.Queries {
 			hasSingle := strings.Contains(q.SQL, PlaceholderPortal)
+			hasConcept := len(conceptRefs(q.SQL)) > 0
 			hasUnion := strings.Contains(q.SQL, PlaceholderCatalog) ||
 				strings.Contains(q.SQL, PlaceholderSyncRuns) ||
 				strings.Contains(q.SQL, PlaceholderAliases)
 
-			if m.MultiPortal && hasSingle {
-				t.Errorf("mode %q query %q: cross-portal mode uses %s",
+			if m.MultiPortal && (hasSingle || hasConcept) {
+				t.Errorf("mode %q query %q: cross-portal mode must not use %s or a concept ref",
 					m.Name, q.Name, PlaceholderPortal)
 			}
 			if !m.MultiPortal && hasUnion {
-				t.Errorf("mode %q query %q: single-portal mode uses a union placeholder",
+				t.Errorf("mode %q query %q: concept-based mode uses a union placeholder",
 					m.Name, q.Name)
 			}
-			if !hasSingle && !hasUnion {
-				t.Errorf("mode %q query %q: no portal placeholder; SQL would not resolve",
+			if !hasSingle && !hasConcept && !hasUnion {
+				t.Errorf("mode %q query %q: no placeholder; SQL would not resolve",
 					m.Name, q.Name)
 			}
 		}
 	}
 }
 
-// TestSinglePortalQueriesReferenceDeclaredTables catches the failure mode where
-// a query is written against a table the mode never syncs.
-func TestSinglePortalQueriesReferenceDeclaredTables(t *testing.T) {
+// TestQueriesReferenceDeclaredConcepts catches a query written against a
+// concept the mode never declares — the portable equivalent of referencing a
+// table that was never synced.
+func TestQueriesReferenceDeclaredConcepts(t *testing.T) {
 	for _, m := range All() {
-		if m.MultiPortal {
-			continue
-		}
-		declared := map[string]bool{}
-		for _, d := range m.Datasets {
-			declared[d.Table] = true
-		}
 		for _, q := range m.Queries {
-			for _, ref := range tableRefs(q.SQL) {
-				if !declared[ref] {
-					t.Errorf("mode %q query %q references undeclared table %q",
+			for _, ref := range conceptRefs(q.SQL) {
+				if _, ok := m.Concept(ref); !ok {
+					t.Errorf("mode %q query %q references undeclared concept %q",
 						m.Name, q.Name, ref)
 				}
 			}
@@ -107,28 +103,82 @@ func TestSinglePortalQueriesReferenceDeclaredTables(t *testing.T) {
 	}
 }
 
-// tableRefs extracts the table names a query reads via the {{P}}.main.<table>
-// convention used by single-portal modes.
-func tableRefs(sqlText string) []string {
-	const prefix = PlaceholderPortal + ".main."
-	var out []string
-	rest := sqlText
-	for {
-		i := strings.Index(rest, prefix)
-		if i < 0 {
-			return out
+// TestBindingsCoverDeclaredConcepts ensures every binding maps only concepts
+// the mode declares, and records at least one.
+func TestBindingsCoverDeclaredConcepts(t *testing.T) {
+	for _, m := range All() {
+		for _, b := range BindingsFor(m.Name) {
+			if b.Portal == "" || b.City == "" {
+				t.Errorf("mode %q: binding missing Portal or City", m.Name)
+			}
+			if len(b.Concepts) == 0 {
+				t.Errorf("mode %q: binding %s has no concepts", m.Name, b.Portal)
+			}
+			for name, bd := range b.Concepts {
+				if _, ok := m.Concept(name); !ok {
+					t.Errorf("mode %q binding %s: binds unknown concept %q",
+						m.Name, b.Portal, name)
+				}
+				if bd.ID == "" || bd.Table == "" || bd.Name == "" {
+					t.Errorf("mode %q binding %s: concept %q incomplete",
+						m.Name, b.Portal, name)
+				}
+			}
 		}
-		rest = rest[i+len(prefix):]
-		end := strings.IndexFunc(rest, func(r rune) bool {
-			return !(r == '_' || (r >= 'a' && r <= 'z') ||
-				(r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
-		})
-		if end < 0 {
-			end = len(rest)
+	}
+}
+
+// TestConceptModesHaveAtLeastOneBinding keeps a concept-based mode from
+// shipping unusable.
+func TestConceptModesHaveAtLeastOneBinding(t *testing.T) {
+	for _, m := range All() {
+		if len(m.Concepts) == 0 {
+			continue
 		}
-		if end > 0 {
-			out = append(out, rest[:end])
+		if len(BindingsFor(m.Name)) == 0 {
+			t.Errorf("mode %q declares concepts but has no bindings", m.Name)
 		}
+	}
+}
+
+func TestExpandConcepts(t *testing.T) {
+	m, _ := Lookup("corruption")
+	b, err := LookupBinding("corruption", "data.cityofchicago.org")
+	if err != nil {
+		t.Fatalf("LookupBinding: %v", err)
+	}
+	got, err := ExpandConcepts("SELECT * FROM {{c:contracts}}", "chi", b)
+	if err != nil {
+		t.Fatalf("ExpandConcepts: %v", err)
+	}
+	if want := "SELECT * FROM chi.main.contracts"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if _, ok := m.Concept("contracts"); !ok {
+		t.Error("corruption should declare a contracts concept")
+	}
+}
+
+func TestRunnableReportsMissingConcepts(t *testing.T) {
+	m, _ := Lookup("police")
+	partial := &Binding{Mode: "police", Portal: "x", City: "X",
+		Concepts: map[string]BoundDataset{
+			"complaints": {ID: "a-1", Table: "c", Name: "C"},
+		}}
+	for _, q := range m.Queries {
+		ok, missing := m.Runnable(q, partial)
+		if !ok && len(missing) == 0 {
+			t.Errorf("query %q not runnable but reported no missing concepts", q.Name)
+		}
+	}
+	if un := m.Unbound(partial); len(un) == 0 {
+		t.Error("Unbound should report the concepts this partial binding lacks")
+	}
+}
+
+func TestPortalFromDBPath(t *testing.T) {
+	if got := PortalFromDBPath("/x/data.cityofchicago.org.duckdb"); got != "data.cityofchicago.org" {
+		t.Errorf("got %q", got)
 	}
 }
 
@@ -195,37 +245,38 @@ func TestUniqueAliasesDisambiguates(t *testing.T) {
 	}
 }
 
-func TestConfigYAMLIncludesEveryDataset(t *testing.T) {
-	m, err := Lookup("corruption")
+func TestConfigYAMLForIncludesEveryBoundDataset(t *testing.T) {
+	m, _ := Lookup("corruption")
+	b, err := LookupBinding("corruption", "data.cityofchicago.org")
 	if err != nil {
-		t.Fatalf("Lookup: %v", err)
+		t.Fatalf("LookupBinding: %v", err)
 	}
-	yaml, err := m.ConfigYAML()
+	yaml, err := m.ConfigYAMLFor(b)
 	if err != nil {
-		t.Fatalf("ConfigYAML: %v", err)
+		t.Fatalf("ConfigYAMLFor: %v", err)
 	}
-	for _, d := range m.Datasets {
-		if !strings.Contains(yaml, d.ID) {
-			t.Errorf("config missing dataset id %q", d.ID)
+	for _, bd := range b.Concepts {
+		if !strings.Contains(yaml, bd.ID) {
+			t.Errorf("config missing dataset id %q", bd.ID)
 		}
-		if !strings.Contains(yaml, "table: "+d.Table) {
-			t.Errorf("config missing table override for %q", d.Table)
+		if !strings.Contains(yaml, "table: "+bd.Table) {
+			t.Errorf("config missing table override for %q", bd.Table)
 		}
 	}
-	if !strings.Contains(yaml, "portal: "+m.Portal) {
-		t.Errorf("config missing portal line")
+	if !strings.Contains(yaml, "portal: "+b.Portal) {
+		t.Error("config missing portal line")
 	}
 }
 
 // TestConfigYAMLRejectsDatasetlessModes documents that `modes init ranking` is
 // meaningless: the mode reads databases you already built.
 func TestConfigYAMLRejectsDatasetlessModes(t *testing.T) {
-	m, err := Lookup("ranking")
-	if err != nil {
-		t.Fatalf("Lookup: %v", err)
+	m, _ := Lookup("ranking")
+	if len(m.Concepts) != 0 {
+		t.Fatal("ranking should declare no concepts")
 	}
-	if _, err := m.ConfigYAML(); err == nil {
-		t.Error("expected ConfigYAML to fail for a mode with no datasets")
+	if len(BindingsFor("ranking")) != 0 {
+		t.Error("ranking should have no bindings")
 	}
 }
 

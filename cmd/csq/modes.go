@@ -88,27 +88,50 @@ func showMode(args []string) error {
 	for _, line := range wrapText(m.About, 76) {
 		fmt.Fprintf(out, "%s\n", line)
 	}
-	if m.Portal != "" {
-		fmt.Fprintf(out, "\nPortal: %s\n", m.Portal)
-	}
-
-	if len(m.Datasets) > 0 {
-		fmt.Fprintf(out, "\nDatasets (%d, ~%s rows total):\n", len(m.Datasets), withCommas(m.ApproxRows()))
-		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		for _, d := range m.Datasets {
-			fmt.Fprintf(tw, "  %s\t%s\t%s\n", d.ID, d.Table, withCommas(d.Rows))
-		}
-		if err := tw.Flush(); err != nil {
-			return err
-		}
-		for _, d := range m.Datasets {
-			fmt.Fprintf(out, "\n  %s — %s\n", d.Table, d.Name)
-			for _, line := range wrapText(d.Why, 70) {
+	if len(m.Concepts) > 0 {
+		fmt.Fprintf(out, "\nConcepts this mode needs (%d):\n", len(m.Concepts))
+		for _, c := range m.Concepts {
+			fmt.Fprintf(out, "\n  %s\n", c.Name)
+			for _, line := range wrapText(c.Purpose, 70) {
 				fmt.Fprintf(out, "      %s\n", line)
+			}
+			if len(c.Required) > 0 {
+				fmt.Fprintf(out, "      requires: %s\n", strings.Join(c.Required, ", "))
+			}
+		}
+
+		bindings := modes.BindingsFor(m.Name)
+		fmt.Fprintf(out, "\nPortals bound (%d):\n", len(bindings))
+		if len(bindings) == 0 {
+			fmt.Fprintf(out, "  none yet — add one to internal/modes/ to support a city\n")
+		}
+		for _, b := range bindings {
+			fmt.Fprintf(out, "\n  %s  (%s)  ~%s rows\n",
+				b.Portal, b.City, withCommas(m.ApproxRowsFor(b)))
+			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			for _, c := range m.Concepts {
+				bd, ok := b.Concepts[c.Name]
+				if !ok {
+					fmt.Fprintf(tw, "      %s\t(not published by this portal)\t\n", c.Name)
+					continue
+				}
+				fmt.Fprintf(tw, "      %s\t%s\t%s\n", c.Name, bd.ID, bd.Table)
+			}
+			if err := tw.Flush(); err != nil {
+				return err
+			}
+			for _, n := range b.Notes {
+				for i, line := range wrapText(n, 66) {
+					if i == 0 {
+						fmt.Fprintf(out, "      note: %s\n", line)
+					} else {
+						fmt.Fprintf(out, "            %s\n", line)
+					}
+				}
 			}
 		}
 	} else {
-		fmt.Fprintf(out, "\nDatasets: none — this mode reads the _csq schema of databases you already have.\n")
+		fmt.Fprintf(out, "\nConcepts: none — this mode reads the _csq schema of databases you already have.\n")
 	}
 
 	fmt.Fprintf(out, "\nQueries (%d):\n", len(m.Queries))
@@ -142,7 +165,9 @@ func initMode(args []string) error {
 		output string
 		force  bool
 	)
+	var portal string
 	fs.StringVar(&output, "output", "", "Write the config here (default: stdout)")
+	fs.StringVar(&portal, "portal", "", "Socrata host to bind (default: the only bound portal)")
 	fs.BoolVar(&force, "force", false, "Overwrite --output if it exists")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -155,7 +180,11 @@ func initMode(args []string) error {
 	if err != nil {
 		return err
 	}
-	yaml, err := m.ConfigYAML()
+	b, err := pickBinding(m, portal)
+	if err != nil {
+		return err
+	}
+	yaml, err := m.ConfigYAMLFor(b)
 	if err != nil {
 		return err
 	}
@@ -169,8 +198,13 @@ func initMode(args []string) error {
 	if err := os.WriteFile(output, []byte(yaml), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[csq] wrote %s (%d datasets, ~%s rows)\n",
-		output, len(m.Datasets), withCommas(m.ApproxRows()))
+	fmt.Fprintf(os.Stderr, "[csq] wrote %s — %s, %d datasets, ~%s rows\n",
+		output, b.Portal, len(b.Concepts), withCommas(m.ApproxRowsFor(b)))
+	if missing := m.Unbound(b); len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "[csq] note: %s does not publish %s; "+
+			"queries needing those will be skipped\n",
+			b.Portal, strings.Join(missing, ", "))
+	}
 	fmt.Fprintf(os.Stderr, "[csq] next: csq sync --config %s\n", output)
 	return nil
 }
@@ -183,7 +217,9 @@ func runModeQueries(args []string) error {
 		limit     int
 		quiet     bool
 	)
+	var portalOverride string
 	fs.StringArrayVar(&dbPaths, "db", nil, "Portal DuckDB to attach (repeatable)")
+	fs.StringVar(&portalOverride, "portal", "", "Socrata host this DB came from (default: derived from filename)")
 	fs.StringVar(&queryName, "query", "", "Run only this query (default: all)")
 	fs.IntVar(&limit, "limit", 0, "Cap rows per query (0 = use the query's own limit)")
 	fs.BoolVar(&quiet, "quiet", false, "Suppress caveats and headers")
@@ -227,6 +263,21 @@ func runModeQueries(args []string) error {
 		}
 	}
 
+	// Concept-based modes need a binding for the attached portal. Derive the
+	// portal from the filename (csq does not record it inside the file) and let
+	// --portal override.
+	var binding *modes.Binding
+	if len(m.Concepts) > 0 {
+		want := portalOverride
+		if want == "" {
+			want = modes.PortalFromDBPath(dbPaths[0])
+		}
+		binding, err = modes.LookupBinding(m.Name, want)
+		if err != nil {
+			return err
+		}
+	}
+
 	queries := m.Queries
 	if queryName != "" {
 		q, err := m.Query(queryName)
@@ -253,7 +304,19 @@ func runModeQueries(args []string) error {
 	}
 
 	for _, q := range queries {
-		expanded, err := modes.Expand(q.SQL, aliases)
+		var expanded string
+		if binding != nil {
+			ok, missing := m.Runnable(q, binding)
+			if !ok {
+				fmt.Fprintf(os.Stderr,
+					"  skipping %s — %s does not publish: %s\n\n",
+					q.Name, binding.Portal, strings.Join(missing, ", "))
+				continue
+			}
+			expanded, err = modes.ExpandConcepts(q.SQL, aliases[0], binding)
+		} else {
+			expanded, err = modes.Expand(q.SQL, aliases)
+		}
 		if err != nil {
 			return fmt.Errorf("query %s: %w", q.Name, err)
 		}
@@ -271,11 +334,11 @@ func runModeQueries(args []string) error {
 			// A missing table means the mode's datasets were never synced. Say
 			// so usefully rather than surfacing a raw binder error.
 			fmt.Fprintf(os.Stderr, "  query %s failed: %v\n", q.Name, err)
-			if strings.Contains(err.Error(), "does not exist") && m.Portal != "" {
+			if strings.Contains(err.Error(), "does not exist") && binding != nil {
 				fmt.Fprintf(os.Stderr,
 					"  hint: sync this mode's datasets first —\n"+
-						"        csq modes init %s --output %s.yaml && csq sync --config %s.yaml\n",
-					m.Name, m.Name, m.Name)
+						"        csq modes init %s --portal %s --output %s.yaml && csq sync --config %s.yaml\n",
+					m.Name, binding.Portal, m.Name, m.Name)
 			}
 			fmt.Fprintln(os.Stderr)
 			continue
@@ -377,4 +440,31 @@ func withCommas(n int64) string {
 		out = append(out, c)
 	}
 	return string(out)
+}
+
+// pickBinding resolves the binding to use: the requested portal, or the only
+// one registered when a mode has exactly one.
+func pickBinding(m *modes.Mode, portal string) (*modes.Binding, error) {
+	if len(m.Concepts) == 0 {
+		return nil, fmt.Errorf(
+			"mode %q has no datasets to sync; it reads the _csq schema of databases you already have",
+			m.Name)
+	}
+	if portal != "" {
+		return modes.LookupBinding(m.Name, portal)
+	}
+	bindings := modes.BindingsFor(m.Name)
+	switch len(bindings) {
+	case 0:
+		return nil, fmt.Errorf("mode %q has no portal bindings", m.Name)
+	case 1:
+		return bindings[0], nil
+	default:
+		names := make([]string, 0, len(bindings))
+		for _, b := range bindings {
+			names = append(names, b.Portal)
+		}
+		return nil, fmt.Errorf("mode %q is bound for several portals; pass --portal (have: %s)",
+			m.Name, strings.Join(names, ", "))
+	}
 }
