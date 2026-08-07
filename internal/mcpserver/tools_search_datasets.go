@@ -13,6 +13,8 @@ import (
 type SearchDatasetsArgs struct {
 	Query  string `json:"query" jsonschema:"substring to match against name and description; also matches tags case-insensitively"`
 	Portal string `json:"portal,omitempty" jsonschema:"optional portal alias filter"`
+	Limit  int    `json:"limit,omitempty" jsonschema:"max datasets to return (default 100, max 1000)"`
+	Offset int    `json:"offset,omitempty" jsonschema:"skip this many matches; use with the returned total to page"`
 }
 
 // searchDatasetsHandler returns datasets whose name or description contain the

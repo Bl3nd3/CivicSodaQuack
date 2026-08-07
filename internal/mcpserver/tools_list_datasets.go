@@ -14,6 +14,8 @@ import (
 type ListDatasetsArgs struct {
 	Portal   string `json:"portal,omitempty" jsonschema:"optional portal alias filter"`
 	Category string `json:"category,omitempty" jsonschema:"optional case-insensitive substring on category"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"max datasets to return (default 100, max 1000)"`
+	Offset   int    `json:"offset,omitempty" jsonschema:"skip this many datasets; use with the returned total to page"`
 }
 
 // DatasetSummary is one row in list_datasets / search_datasets results.

@@ -59,8 +59,59 @@ func Serve(ctx context.Context, opts Options) error {
 
 // DatasetList wraps a slice of DatasetSummary so the MCP output schema has
 // type "object" (the spec requires the output schema root to be an object).
+//
+// Total is the match count before paging, so a consumer can tell a complete
+// answer from the first page of a long one. Returned is len(Datasets).
 type DatasetList struct {
 	Datasets []DatasetSummary `json:"datasets"`
+	Total    int              `json:"total"`
+	Returned int              `json:"returned"`
+	Offset   int              `json:"offset"`
+	Limit    int              `json:"limit"`
+}
+
+// DefaultDatasetLimit caps an unparameterised list_datasets/search_datasets
+// call. Real portals carry thousands of catalog entries — Chicago alone
+// returned 351,820 characters unpaged, past what an agent can accept — so the
+// default has to be a page, not everything.
+const DefaultDatasetLimit = 100
+
+// MaxDatasetLimit bounds what a caller can request explicitly.
+const MaxDatasetLimit = 1000
+
+// paginate applies offset/limit to a full result set and reports the totals.
+// A negative or zero limit means DefaultDatasetLimit; limits above
+// MaxDatasetLimit are clamped rather than rejected, so an over-eager caller
+// still gets a usable answer.
+func paginate(all []DatasetSummary, offset, limit int) DatasetList {
+	if limit <= 0 {
+		limit = DefaultDatasetLimit
+	}
+	if limit > MaxDatasetLimit {
+		limit = MaxDatasetLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	total := len(all)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := all[offset:end]
+	if page == nil {
+		page = []DatasetSummary{}
+	}
+	return DatasetList{
+		Datasets: page,
+		Total:    total,
+		Returned: len(page),
+		Offset:   offset,
+		Limit:    limit,
+	}
 }
 
 // buildServer creates an *mcp.Server and registers all four read tools (and
@@ -72,14 +123,16 @@ func buildServer(pools *Pools, configs map[string]*config.Config) (*mcp.Server, 
 	}, nil)
 
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "list_datasets",
-		Description: "List datasets available across attached portal DuckDB files. Use the optional 'portal' or 'category' filters to narrow the result.",
+		Name: "list_datasets",
+		Description: "List datasets across attached portal DuckDB files. Filter with 'portal' or 'category'. " +
+			"Paged: returns 100 by default, up to 1000 via 'limit'; use 'offset' with the reported 'total' to page. " +
+			"'synced' reports whether a dataset has actually been synced — only then is 'table_name' non-null and queryable.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args ListDatasetsArgs) (*mcp.CallToolResult, DatasetList, error) {
 		out, err := listDatasetsHandler(ctx, pools, args)
 		if err != nil {
 			return nil, DatasetList{}, err
 		}
-		return &mcp.CallToolResult{}, DatasetList{Datasets: out}, nil
+		return &mcp.CallToolResult{}, paginate(out, args.Offset, args.Limit), nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -94,14 +147,15 @@ func buildServer(pools *Pools, configs map[string]*config.Config) (*mcp.Server, 
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
-		Name:        "search_datasets",
-		Description: "Substring match on dataset name, description, and tags (case-insensitive).",
+		Name: "search_datasets",
+		Description: "Substring match on dataset name, description, and tags (case-insensitive). " +
+			"Paged like list_datasets: 100 by default, up to 1000 via 'limit', with 'offset' and 'total'.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args SearchDatasetsArgs) (*mcp.CallToolResult, DatasetList, error) {
 		out, err := searchDatasetsHandler(ctx, pools, args)
 		if err != nil {
 			return nil, DatasetList{}, err
 		}
-		return &mcp.CallToolResult{}, DatasetList{Datasets: out}, nil
+		return &mcp.CallToolResult{}, paginate(out, args.Offset, args.Limit), nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
