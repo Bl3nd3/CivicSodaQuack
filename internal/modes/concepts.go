@@ -45,6 +45,10 @@ type Binding struct {
 	// Notes records portal-wide caveats a user must read before comparing this
 	// city with another.
 	Notes []string
+
+	// Source is the file an external binding was loaded from; empty for
+	// built-ins. Shown by `csq modes show` so a user can tell which file to edit.
+	Source string
 }
 
 // bindingRegistry is the set of built-in bindings, keyed by mode then portal.

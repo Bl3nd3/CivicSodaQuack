@@ -67,6 +67,10 @@ type Mode struct {
 	// and again above query output, because a number without its caveat is
 	// how civic data gets misread.
 	Caveats []string
+
+	// Source is the file an external mode was loaded from; empty for built-ins.
+	// Shown by `csq modes show` so a user can tell which file to edit.
+	Source string
 }
 
 // registry is the ordered set of built-in modes.

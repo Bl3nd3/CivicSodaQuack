@@ -20,9 +20,15 @@ const modesUsage = `csq modes — curated analysis profiles
 
 Usage:
   csq modes                              List available modes
-  csq modes show <mode>                  Datasets, queries, and caveats for one mode
-  csq modes init <mode> [--output FILE]  Write a sync config covering the mode's datasets
+  csq modes show <mode>                  Concepts, portals, queries, and caveats
+  csq modes init <mode> [--portal HOST] [--output FILE]
   csq modes run  <mode> --db <file> [--db ...] [--query NAME] [--limit N]
+  csq modes lint <file.yaml> ...         Check an external mode or binding file
+  csq modes where                        Show where external modes are loaded from
+
+Modes and bindings can be added as YAML in ~/.csq/modes/ (override with
+--modes-dir or CSQ_MODES_DIR) without rebuilding csq. Run 'csq modes lint'
+on a file to check it before use.
 
 Examples:
   csq modes
@@ -34,6 +40,8 @@ Examples:
 `
 
 func runModes(args []string) error {
+	args = extractModesDirFlag(args)
+	loadExternalModes()
 	if len(args) == 0 {
 		return listModes(os.Stdout)
 	}
@@ -46,6 +54,10 @@ func runModes(args []string) error {
 		return runModeQueries(args[1:])
 	case "list":
 		return listModes(os.Stdout)
+	case "lint":
+		return lintModeFiles(args[1:])
+	case "where":
+		return showModesDir(os.Stdout)
 	case "-h", "--help", "help":
 		fmt.Print(modesUsage)
 		return nil
@@ -85,6 +97,9 @@ func showMode(args []string) error {
 	out := os.Stdout
 
 	fmt.Fprintf(out, "%s\n%s\n\n", m.Title, strings.Repeat("=", len(m.Title)))
+	if m.Source != "" {
+		fmt.Fprintf(out, "Defined in: %s\n\n", m.Source)
+	}
 	for _, line := range wrapText(m.About, 76) {
 		fmt.Fprintf(out, "%s\n", line)
 	}
@@ -108,6 +123,9 @@ func showMode(args []string) error {
 		for _, b := range bindings {
 			fmt.Fprintf(out, "\n  %s  (%s)  ~%s rows\n",
 				b.Portal, b.City, withCommas(m.ApproxRowsFor(b)))
+			if b.Source != "" {
+				fmt.Fprintf(out, "      from: %s\n", b.Source)
+			}
 			tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 			for _, c := range m.Concepts {
 				bd, ok := b.Concepts[c.Name]
@@ -467,4 +485,99 @@ func pickBinding(m *modes.Mode, portal string) (*modes.Binding, error) {
 		return nil, fmt.Errorf("mode %q is bound for several portals; pass --portal (have: %s)",
 			m.Name, strings.Join(names, ", "))
 	}
+}
+
+// lintModeFiles validates external mode/binding files without registering them.
+func lintModeFiles(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: csq modes lint <file.yaml> [file.yaml ...]")
+	}
+	var bad int
+	for _, path := range args {
+		kind, name, err := modes.LintFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  FAIL  %s\n        %v\n", path, err)
+			bad++
+			continue
+		}
+		fmt.Printf("  ok    %s  (%s: %s)\n", path, kind, name)
+	}
+	if bad > 0 {
+		return fmt.Errorf("%d of %d file(s) failed", bad, len(args))
+	}
+	return nil
+}
+
+// showModesDir reports where external modes are read from and what was found.
+func showModesDir(out *os.File) error {
+	dir := modesDir()
+	fmt.Fprintf(out, "External modes directory:\n  %s\n\n", dir)
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		fmt.Fprintf(out, "It does not exist yet. Create it and drop in a YAML file:\n")
+		fmt.Fprintf(out, "  mkdir -p %s\n\n", dir)
+		fmt.Fprintf(out, "Override the location with --modes-dir or CSQ_MODES_DIR.\n")
+		return nil
+	}
+	var external int
+	for _, m := range modes.All() {
+		if m.Source != "" {
+			fmt.Fprintf(out, "  mode     %-12s %s\n", m.Name, m.Source)
+			external++
+		}
+		for _, b := range modes.BindingsFor(m.Name) {
+			if b.Source != "" {
+				fmt.Fprintf(out, "  binding  %-12s %s → %s\n", m.Name, b.Portal, b.Source)
+				external++
+			}
+		}
+	}
+	if external == 0 {
+		fmt.Fprintf(out, "No external modes or bindings loaded from it yet.\n")
+	}
+	return nil
+}
+
+// modesDir resolves where external modes are loaded from, in precedence order:
+// the --modes-dir flag (captured into modesDirOverride), CSQ_MODES_DIR, then
+// ~/.csq/modes.
+func modesDir() string {
+	if modesDirOverride != "" {
+		return modesDirOverride
+	}
+	if d := os.Getenv("CSQ_MODES_DIR"); d != "" {
+		return d
+	}
+	return modes.DefaultModesDir()
+}
+
+// modesDirOverride is set from the --modes-dir flag before dispatch.
+var modesDirOverride string
+
+// loadExternalModes registers any user-supplied modes and bindings. A failure
+// is reported but not fatal: one broken file should not make csq unusable, and
+// the message names the file so it can be fixed or removed.
+func loadExternalModes() {
+	if _, err := modes.LoadDir(modesDir()); err != nil {
+		fmt.Fprintf(os.Stderr, "[csq] warning: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[csq] continuing with built-in modes only; "+
+			"run 'csq modes lint <file>' to check it\n")
+	}
+}
+
+// extractModesDirFlag pulls --modes-dir out of the argument list before
+// dispatch, so every subcommand honours it without repeating the flag.
+func extractModesDirFlag(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--modes-dir" && i+1 < len(args):
+			modesDirOverride = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--modes-dir="):
+			modesDirOverride = strings.TrimPrefix(args[i], "--modes-dir=")
+		default:
+			out = append(out, args[i])
+		}
+	}
+	return out
 }
