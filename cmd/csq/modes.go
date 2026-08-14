@@ -345,7 +345,7 @@ func runModeQueries(args []string) error {
 					q.Name, binding.Portal, strings.Join(missing, ", "))
 				continue
 			}
-			expanded, err = modes.ExpandConcepts(q.SQL, aliases[0], binding)
+			expanded, err = modes.ExpandConceptsFor(m, q.SQL, aliases[0], binding)
 		default:
 			expanded, err = modes.Expand(q.SQL, aliases)
 		}
@@ -617,7 +617,7 @@ func buildPerCityUnion(m *modes.Mode, q modes.Query, aliases []string,
 			excluded = append(excluded, fmt.Sprintf("%s (%s)", b.City, why))
 			continue
 		}
-		one, err := modes.ExpandConcepts(q.SQL, aliases[i], b)
+		one, err := modes.ExpandConceptsFor(m, q.SQL, aliases[i], b)
 		if err != nil {
 			return "", err
 		}

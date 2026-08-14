@@ -30,6 +30,51 @@ type BoundDataset struct {
 	Name  string // upstream dataset title
 	Rows  int64  // approximate upstream row count, informational
 	Notes string // definitional caveats specific to this portal
+
+	// Columns maps a concept's column name to this portal's actual column, so
+	// queries can be written once against canonical names. Chicago calls an
+	// offence date `date`; NYC calls it `cmplnt_fr_dt`.
+	//
+	// When non-empty this map is authoritative: a concept column absent from it
+	// is treated as unavailable on this portal, and any query needing it
+	// excludes the city with a reason. That explicitness matters — assuming a
+	// missing column is merely unmapped would let a NULL read as a real value,
+	// which for a rate or a share is indistinguishable from a good result.
+	//
+	// An empty map means the table already uses the concept's own names.
+	Columns map[string]string
+}
+
+// ColumnFor returns this portal's column for a concept column, and whether it
+// is available at all.
+func (bd BoundDataset) ColumnFor(conceptCol string) (string, bool) {
+	if len(bd.Columns) == 0 {
+		return conceptCol, true // identity: the table already uses canonical names
+	}
+	actual, ok := bd.Columns[conceptCol]
+	return actual, ok
+}
+
+// CanonicalView builds a SELECT that renames this portal's columns to the
+// concept's canonical ones, so every query reads the same shape whichever city
+// it runs against.
+func (c Concept) CanonicalView(qualifiedTable string, bd BoundDataset) string {
+	cols := make([]string, 0, len(c.Required)+len(c.Optional))
+	for _, name := range append(append([]string{}, c.Required...), c.Optional...) {
+		actual, ok := bd.ColumnFor(name)
+		if !ok {
+			continue // unavailable here; queries needing it are gated out
+		}
+		if actual == name {
+			cols = append(cols, name)
+			continue
+		}
+		cols = append(cols, fmt.Sprintf("%s AS %s", actual, name))
+	}
+	if len(cols) == 0 {
+		return "SELECT * FROM " + qualifiedTable
+	}
+	return "SELECT " + strings.Join(cols, ", ") + " FROM " + qualifiedTable
 }
 
 // A Binding maps one portal's datasets onto one mode's concepts. Bindings are
@@ -174,13 +219,31 @@ func (m *Mode) Runnable(q Query, b *Binding) (bool, []string) {
 // ExpandConcepts substitutes {{c:name}} for the bound table, qualified by the
 // portal alias, {{P}} for the alias, and {{POP}} for the city's population.
 func ExpandConcepts(sqlText string, alias string, b *Binding) (string, error) {
+	return expandWith(sqlText, alias, b, nil)
+}
+
+// ExpandConceptsFor is ExpandConcepts with the mode available, so concept
+// columns can be renamed to their canonical names for this portal.
+func ExpandConceptsFor(m *Mode, sqlText string, alias string, b *Binding) (string, error) {
+	return expandWith(sqlText, alias, b, m)
+}
+
+func expandWith(sqlText string, alias string, b *Binding, m *Mode) (string, error) {
 	for _, name := range conceptRefs(sqlText) {
 		bd, ok := b.Concepts[name]
 		if !ok {
 			return "", fmt.Errorf("concept %q is not bound for portal %s", name, b.Portal)
 		}
-		sqlText = strings.ReplaceAll(sqlText,
-			"{{c:"+name+"}}", alias+".main."+bd.Table)
+		qualified := alias + ".main." + bd.Table
+		replacement := qualified
+		if m != nil {
+			if c, ok := m.Concept(name); ok {
+				// Wrap in a canonical projection so the query can use the
+				// concept's column names whatever this portal calls them.
+				replacement = "(" + c.CanonicalView(qualified, bd) + ")"
+			}
+		}
+		sqlText = strings.ReplaceAll(sqlText, "{{c:"+name+"}}", replacement)
 	}
 	if strings.Contains(sqlText, PlaceholderPopulation) {
 		if b.Population <= 0 {
@@ -200,9 +263,10 @@ func NeedsPopulation(q Query) bool {
 }
 
 // Comparable reports whether this binding can answer the query: every concept
-// bound, and a population if the query needs one. The reason is returned so the
-// runner can say why a city was left out rather than silently dropping it —
-// absent data must never read as a good result.
+// bound, every column the query reads available on this portal, and a
+// population if the query needs one. The reason is returned so the runner can
+// say why a city was left out rather than silently dropping it — absent data
+// must never read as a good result.
 func (m *Mode) Comparable(q Query, b *Binding) (bool, string) {
 	if ok, missing := m.Runnable(q, b); !ok {
 		return false, "does not publish " + strings.Join(missing, ", ")
@@ -210,7 +274,61 @@ func (m *Mode) Comparable(q Query, b *Binding) (bool, string) {
 	if NeedsPopulation(q) && b.Population <= 0 {
 		return false, "no population recorded, so a per-capita rate cannot be computed"
 	}
+	if missing := m.missingColumns(q, b); len(missing) > 0 {
+		return false, "does not record " + strings.Join(missing, ", ")
+	}
 	return true, ""
+}
+
+// missingColumns lists concept columns this query reads that the portal does
+// not provide. Only optional columns can be missing — a binding lacking a
+// required column is a broken binding, caught at load time.
+func (m *Mode) missingColumns(q Query, b *Binding) []string {
+	var missing []string
+	for _, name := range conceptRefs(q.SQL) {
+		c, ok := m.Concept(name)
+		if !ok {
+			continue
+		}
+		bd, ok := b.Concepts[name]
+		if !ok {
+			continue
+		}
+		for _, col := range c.Optional {
+			if !queryUsesColumn(q.SQL, col) {
+				continue
+			}
+			if _, avail := bd.ColumnFor(col); !avail {
+				missing = append(missing, col)
+			}
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// queryUsesColumn reports whether the SQL references col as a whole word.
+func queryUsesColumn(sqlText, col string) bool {
+	lower := strings.ToLower(sqlText)
+	target := strings.ToLower(col)
+	for i := 0; ; {
+		j := strings.Index(lower[i:], target)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(target)
+		beforeOK := start == 0 || !isIdentByte(lower[start-1])
+		afterOK := end == len(lower) || !isIdentByte(lower[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		i = end
+	}
+}
+
+func isIdentByte(b byte) bool {
+	return b == '_' || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // PortalFromDBPath derives the Socrata host a database was synced from. csq
