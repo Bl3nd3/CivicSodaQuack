@@ -30,6 +30,9 @@ const (
 	PlaceholderCatalog = "{{CATALOG}}"
 	// PlaceholderSyncRuns expands to a unioned _csq.sync_runs across all portals.
 	PlaceholderSyncRuns = "{{SYNCRUNS}}"
+	// PlaceholderPopulation expands to the bound city's resident count, so a
+	// query can normalise counts into per-capita rates.
+	PlaceholderPopulation = "{{POP}}"
 	// PlaceholderAliases expands to a quoted, comma-separated alias list, for
 	// scoping engine metadata functions such as duckdb_columns() — which span
 	// every attached database — to just the portals the user asked for.

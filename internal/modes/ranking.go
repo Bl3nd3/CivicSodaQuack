@@ -2,141 +2,171 @@
 
 package modes
 
-// rankingMode compares the portals you have attached against each other.
+// rankingMode compares cities on published indicators, normalised per resident.
 //
-// It ranks open-data transparency — breadth, subject coverage, freshness — and
-// not livability, safety, or governance quality. That restraint is deliberate.
-// Ranking cities on outcomes would need population denominators and a mapping
-// between incompatible per-city schemas, neither of which csq has; a tool that
-// produced such a number anyway would be inventing it. What every csq database
-// does share is the _csq bookkeeping schema, so this mode reads only that and
-// works against any portal without per-city special-casing.
+// Two design constraints are deliberate and load-bearing, because the audience
+// for this mode includes people deciding where to live and they are the least
+// equipped to catch a bad number:
+//
+// No composite score. The mode emits several separately-caveated indicators and
+// never a single "city score". A composite invites a screenshot, and any
+// weighting that produces one is an editorial judgement disguised as
+// arithmetic.
+//
+// Absent data is never a good result. A city that does not publish crime data
+// must not appear safe. Every query is gated on the city binding the concept
+// *and* declaring a population; cities failing either are excluded by name with
+// the reason, rather than dropped silently or shown with a blank.
+//
+// Raw counts are never compared across cities — only per-capita rates — because
+// a raw count ranking is a population ranking wearing a disguise.
 var rankingMode = &Mode{
 	Name:        "ranking",
-	Title:       "City ranking — comparing portals on open-data transparency",
-	Summary:     "Rank attached portals by breadth, subject coverage, and freshness",
+	Title:       "City ranking — comparable indicators, normalised per resident",
+	Summary:     "Compare cities on crime, 311 responsiveness, and permit activity",
 	MultiPortal: true,
-	About: "Compares every attached portal on what it publishes and how current " +
-		"it is: dataset counts, subject-area coverage, how much you have actually " +
-		"synced locally, and how recently. Reads only the _csq schema that every " +
-		"csq database carries, so any portal can be added without new code. Pass " +
-		"several --db flags to rank them side by side. This measures data " +
-		"transparency, not how good a city is to live in — see the caveats.",
+	About: "Compares every attached city on the indicators both publish, " +
+		"normalised by population. Each query runs once per city and the results " +
+		"are stacked for comparison. Cities that do not publish an indicator, or " +
+		"that have no population recorded, are excluded from that comparison by " +
+		"name — never shown as zero or blank. There is deliberately no overall " +
+		"score: these are separate measures of separate things, and combining " +
+		"them would be an editorial choice pretending to be a calculation.",
 
-	// No Datasets: this mode reads the _csq bookkeeping schema of databases you
-	// have already built, rather than syncing anything of its own.
+	Concepts: []Concept{
+		{
+			Name:     "crimes",
+			Purpose:  "Reported offences, for per-capita rates and arrest share.",
+			Required: []string{"date", "primary_type"},
+			Optional: []string{"arrest"},
+		},
+		{
+			Name:     "service_requests",
+			Purpose:  "311-style requests, for responsiveness and service load.",
+			Required: []string{"created_date", "status"},
+			Optional: []string{"closed_date", "sr_type"},
+		},
+		{
+			Name:     "building_permits",
+			Purpose:  "Permits issued, as a proxy for construction activity.",
+			Required: []string{"issue_date"},
+			Optional: []string{"processing_time"},
+		},
+	},
 
 	Queries: []Query{
 		{
-			Name: "breadth",
-			Desc: "Datasets published per portal, and how many carry a description.",
+			Name: "crime-rate",
+			Desc: "Reported offences per 1,000 residents per year. Reported crime is not crime: it reflects what residents report and what the department records, both of which vary by city.",
 			SQL: `
-SELECT portal,
-       COUNT(*)                                            AS datasets_published,
-       COUNT(DISTINCT category)                            AS distinct_categories,
-       SUM(CASE WHEN COALESCE(TRIM(description), '') <> '' THEN 1 ELSE 0 END)
-                                                           AS with_description,
-       ROUND(100.0 * SUM(CASE WHEN COALESCE(TRIM(description), '') <> '' THEN 1 ELSE 0 END)
-             / COUNT(*), 1)                                AS pct_documented
-FROM {{CATALOG}}
-GROUP BY portal
-ORDER BY datasets_published DESC`,
+SELECT date_part('year', date)                              AS year,
+       COUNT(*)                                             AS reported_offences,
+       ROUND(COUNT(*) * 1000.0 / {{POP}}, 2)                AS per_1000_residents
+FROM {{c:crimes}}
+WHERE date IS NOT NULL
+  AND date >= DATE '2015-01-01' AND date < DATE '2035-01-01'
+GROUP BY year
+ORDER BY year DESC
+LIMIT 10`,
 		},
 		{
-			Name: "category-coverage",
-			Desc: "Subject-area coverage per portal. Blanks are real gaps in what a city publishes.",
+			Name: "crime-mix",
+			Desc: "Share of reported offences by type — composition, not rate. Comparable only where both cities use similar offence categories, which is often not the case.",
 			SQL: `
-SELECT COALESCE(NULLIF(TRIM(category), ''), '(uncategorised)') AS category,
-       portal,
-       COUNT(*)                                                AS datasets
-FROM {{CATALOG}}
-GROUP BY category, portal
-ORDER BY category, datasets DESC`,
+SELECT primary_type,
+       COUNT(*)                                           AS offences,
+       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct_of_reported
+FROM {{c:crimes}}
+WHERE date >= DATE '2020-01-01' AND date < DATE '2035-01-01'
+GROUP BY primary_type
+ORDER BY offences DESC
+LIMIT 12`,
 		},
 		{
-			Name: "sync-coverage",
-			Desc: "How much of each portal you hold locally — synced datasets against published ones.",
+			Name: "arrest-share",
+			Desc: "Share of reported offences recording an arrest. A low share is not a failure measure — clearance practice and recording rules differ.",
 			SQL: `
-WITH published AS (
-  SELECT portal, COUNT(*) AS datasets_published
-  FROM {{CATALOG}}
-  GROUP BY portal
-),
-synced AS (
-  SELECT portal,
-         COUNT(DISTINCT dataset_id)                                     AS datasets_synced,
-         SUM(CASE WHEN status = 'ok' THEN rows_written ELSE 0 END)      AS rows_held
-  FROM {{SYNCRUNS}}
-  WHERE status = 'ok'
-  GROUP BY portal
-)
-SELECT p.portal,
-       p.datasets_published,
-       COALESCE(s.datasets_synced, 0)                                   AS datasets_synced,
-       ROUND(100.0 * COALESCE(s.datasets_synced, 0)
-             / NULLIF(p.datasets_published, 0), 2)                      AS pct_synced,
-       COALESCE(s.rows_held, 0)                                         AS rows_held
-FROM published p
-LEFT JOIN synced s USING (portal)
-ORDER BY rows_held DESC`,
+SELECT date_part('year', date)                                        AS year,
+       COUNT(*)                                                       AS reported_offences,
+       ROUND(100.0 * SUM(CASE WHEN arrest THEN 1 ELSE 0 END)
+             / COUNT(*), 2)                                           AS pct_with_arrest
+FROM {{c:crimes}}
+WHERE date >= DATE '2018-01-01' AND date < DATE '2035-01-01'
+GROUP BY year
+ORDER BY year DESC
+LIMIT 8`,
 		},
 		{
-			Name: "freshness",
-			Desc: "How recently each portal was synced, and how long the last run took.",
+			Name: "311-responsiveness",
+			Desc: "Median days to close a service request. The most genuinely comparable indicator here — but only across request types a city actually handles.",
 			SQL: `
-SELECT portal,
-       COUNT(*)                                    AS sync_runs,
-       SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END)     AS ok_runs,
-       SUM(CASE WHEN status <> 'ok' THEN 1 ELSE 0 END)    AS failed_runs,
-       MAX(started_at)                             AS last_sync_started,
-       ROUND(MAX(duration_ms) / 1000.0, 1)         AS slowest_run_seconds
-FROM {{SYNCRUNS}}
-GROUP BY portal
-ORDER BY last_sync_started DESC NULLS LAST`,
+SELECT date_part('year', created_date)                                AS year,
+       COUNT(*)                                                       AS requests,
+       ROUND(MEDIAN(date_diff('day', created_date, closed_date)), 1)  AS median_days_to_close,
+       ROUND(100.0 * SUM(CASE WHEN closed_date IS NOT NULL THEN 1 ELSE 0 END)
+             / COUNT(*), 1)                                           AS pct_closed
+FROM {{c:service_requests}}
+WHERE created_date IS NOT NULL
+  AND created_date >= DATE '2019-01-01' AND created_date < DATE '2035-01-01'
+GROUP BY year
+ORDER BY year DESC
+LIMIT 8`,
 		},
 		{
-			Name: "largest-datasets",
-			Desc: "The biggest tables you hold, across every attached portal.",
+			Name: "311-load",
+			Desc: "Service requests per 1,000 residents. Higher can mean worse conditions or better reporting channels — it does not distinguish them.",
 			SQL: `
-SELECT portal, dataset_id, table_name, rows_written, started_at
-FROM {{SYNCRUNS}}
-WHERE status = 'ok' AND rows_written > 0
-ORDER BY rows_written DESC
-LIMIT 30`,
+SELECT date_part('year', created_date)                AS year,
+       COUNT(*)                                       AS requests,
+       ROUND(COUNT(*) * 1000.0 / {{POP}}, 2)          AS per_1000_residents
+FROM {{c:service_requests}}
+WHERE created_date IS NOT NULL
+  AND created_date >= DATE '2019-01-01' AND created_date < DATE '2035-01-01'
+GROUP BY year
+ORDER BY year DESC
+LIMIT 8`,
 		},
 		{
-			Name: "shared-categories",
-			Desc: "Categories present on every attached portal — the only fair basis for a like-for-like comparison.",
+			Name: "permit-activity",
+			Desc: "Building permits issued per 10,000 residents — a rough proxy for construction activity. Permit regimes differ, so treat cross-city gaps as a question.",
 			SQL: `
-WITH portals AS (SELECT COUNT(DISTINCT portal) AS n FROM {{CATALOG}}),
-cats AS (
-  SELECT COALESCE(NULLIF(TRIM(category), ''), '(uncategorised)') AS category,
-         COUNT(DISTINCT portal) AS portals_with,
-         COUNT(*)               AS total_datasets
-  FROM {{CATALOG}}
-  GROUP BY category
-)
-SELECT c.category, c.portals_with, c.total_datasets
-FROM cats c, portals p
-WHERE c.portals_with = p.n
-ORDER BY c.total_datasets DESC`,
+SELECT date_part('year', issue_date)                   AS year,
+       COUNT(*)                                        AS permits_issued,
+       ROUND(COUNT(*) * 10000.0 / {{POP}}, 2)          AS per_10000_residents
+FROM {{c:building_permits}}
+WHERE issue_date IS NOT NULL
+  AND issue_date >= DATE '2015-01-01' AND issue_date < DATE '2035-01-01'
+GROUP BY year
+ORDER BY year DESC
+LIMIT 10`,
 		},
 	},
 
 	Caveats: []string{
-		"This ranks open-data transparency, not quality of governance or life. A city " +
-			"that publishes more is easier to scrutinise; that is the only claim these " +
-			"numbers support.",
-		"Dataset counts reward volume, not usefulness. A portal can inflate its total " +
-			"with dozens of near-duplicate yearly extracts and deprecated boundary " +
-			"files — both are common in practice.",
-		"Categories are each portal's own labels, not a shared taxonomy. Chicago's " +
-			"'Public Safety' and another city's nearest equivalent may not cover the " +
-			"same ground, so cross-portal category comparisons are indicative at best.",
-		"Sync coverage measures what you chose to pull, not what the portal offers. A " +
-			"low percentage usually reflects your config, not the city.",
-		"Comparisons are only as fair as the portals attached. Ranking two cities on " +
-			"categories only one of them uses will produce a confident, meaningless " +
-			"ordering — start from the shared-categories query.",
+		"These are separate indicators, not a ranking. There is deliberately no " +
+			"overall score: combining crime, service responsiveness, and construction " +
+			"into one number requires a weighting that is an editorial judgement, and " +
+			"presenting it as arithmetic would be dishonest.",
+		"A city missing from a comparison is missing because it does not publish that " +
+			"indicator or has no recorded population — never because it scored zero. " +
+			"Read the exclusion list before drawing any conclusion from who is present.",
+		"Reported crime is not crime. It measures what residents report and what a " +
+			"department records. A city with higher trust in police, or better reporting " +
+			"channels, will show more reported offences for identical underlying " +
+			"conditions. Never read these rates as relative danger.",
+		"Offence categories, 311 request types, and permit rules are set by each city " +
+			"independently. Two cities' 'theft' or 'pothole' may not cover the same " +
+			"ground, so composition comparisons are indicative at best.",
+		"Population is a single declared figure, not a time series. Rates for earlier " +
+			"years are computed against today's population and will be wrong in " +
+			"proportion to how much the city has grown or shrunk.",
+		"City boundaries are not metro areas. A city whose suburbs sit outside its " +
+			"boundary reports different rates from one that annexed them, with no " +
+			"difference on the ground.",
+		"This cannot tell you where to live. It compares a handful of things two " +
+			"bureaucracies happen to publish, which is not the same as what a place is " +
+			"like to live in — and says nothing about cost, schools, transit, or " +
+			"anything at neighbourhood scale, where variation within a city usually " +
+			"exceeds the variation between cities.",
 	},
 }

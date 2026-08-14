@@ -46,6 +46,16 @@ type Binding struct {
 	// city with another.
 	Notes []string
 
+	// Population is the city's resident count, used to normalise indicators
+	// into per-capita rates. Zero means unknown, which excludes this city from
+	// any rate comparison rather than silently comparing raw counts — a raw
+	// count ranking is a population ranking wearing a disguise.
+	Population int64
+	// PopulationSource names where Population came from. Required whenever
+	// Population is set: a denominator without a citation is not usable in a
+	// comparison someone might act on.
+	PopulationSource string
+
 	// Source is the file an external binding was loaded from; empty for
 	// built-ins. Shown by `csq modes show` so a user can tell which file to edit.
 	Source string
@@ -162,7 +172,7 @@ func (m *Mode) Runnable(q Query, b *Binding) (bool, []string) {
 }
 
 // ExpandConcepts substitutes {{c:name}} for the bound table, qualified by the
-// portal alias, and {{P}} for the alias itself.
+// portal alias, {{P}} for the alias, and {{POP}} for the city's population.
 func ExpandConcepts(sqlText string, alias string, b *Binding) (string, error) {
 	for _, name := range conceptRefs(sqlText) {
 		bd, ok := b.Concepts[name]
@@ -172,7 +182,35 @@ func ExpandConcepts(sqlText string, alias string, b *Binding) (string, error) {
 		sqlText = strings.ReplaceAll(sqlText,
 			"{{c:"+name+"}}", alias+".main."+bd.Table)
 	}
+	if strings.Contains(sqlText, PlaceholderPopulation) {
+		if b.Population <= 0 {
+			return "", fmt.Errorf(
+				"%s has no population recorded, so per-capita rates cannot be computed; "+
+					"add population and population_source to its binding", b.Portal)
+		}
+		sqlText = strings.ReplaceAll(sqlText, PlaceholderPopulation,
+			fmt.Sprintf("%d", b.Population))
+	}
 	return strings.ReplaceAll(sqlText, PlaceholderPortal, alias), nil
+}
+
+// NeedsPopulation reports whether a query normalises by population.
+func NeedsPopulation(q Query) bool {
+	return strings.Contains(q.SQL, PlaceholderPopulation)
+}
+
+// Comparable reports whether this binding can answer the query: every concept
+// bound, and a population if the query needs one. The reason is returned so the
+// runner can say why a city was left out rather than silently dropping it —
+// absent data must never read as a good result.
+func (m *Mode) Comparable(q Query, b *Binding) (bool, string) {
+	if ok, missing := m.Runnable(q, b); !ok {
+		return false, "does not publish " + strings.Join(missing, ", ")
+	}
+	if NeedsPopulation(q) && b.Population <= 0 {
+		return false, "no population recorded, so a per-capita rate cannot be computed"
+	}
+	return true, ""
 }
 
 // PortalFromDBPath derives the Socrata host a database was synced from. csq

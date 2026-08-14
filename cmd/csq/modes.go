@@ -4,6 +4,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -281,19 +282,26 @@ func runModeQueries(args []string) error {
 		}
 	}
 
-	// Concept-based modes need a binding for the attached portal. Derive the
-	// portal from the filename (csq does not record it inside the file) and let
-	// --portal override.
+	// Concept-based modes need a binding per attached portal. csq does not
+	// record the portal inside the file, so it is derived from the filename;
+	// --portal overrides it for a single database.
+	bindings := make([]*modes.Binding, len(dbPaths))
+	if len(m.Concepts) > 0 {
+		for i, path := range dbPaths {
+			want := modes.PortalFromDBPath(path)
+			if portalOverride != "" && len(dbPaths) == 1 {
+				want = portalOverride
+			}
+			b, err := modes.LookupBinding(m.Name, want)
+			if err != nil {
+				return err
+			}
+			bindings[i] = b
+		}
+	}
 	var binding *modes.Binding
 	if len(m.Concepts) > 0 {
-		want := portalOverride
-		if want == "" {
-			want = modes.PortalFromDBPath(dbPaths[0])
-		}
-		binding, err = modes.LookupBinding(m.Name, want)
-		if err != nil {
-			return err
-		}
+		binding = bindings[0]
 	}
 
 	queries := m.Queries
@@ -323,7 +331,13 @@ func runModeQueries(args []string) error {
 
 	for _, q := range queries {
 		var expanded string
-		if binding != nil {
+		switch {
+		case m.MultiPortal && len(m.Concepts) > 0:
+			expanded, err = buildPerCityUnion(m, q, aliases, bindings, quiet)
+			if err == errNoComparableCity {
+				continue
+			}
+		case binding != nil:
 			ok, missing := m.Runnable(q, binding)
 			if !ok {
 				fmt.Fprintf(os.Stderr,
@@ -332,7 +346,7 @@ func runModeQueries(args []string) error {
 				continue
 			}
 			expanded, err = modes.ExpandConcepts(q.SQL, aliases[0], binding)
-		} else {
+		default:
 			expanded, err = modes.Expand(q.SQL, aliases)
 		}
 		if err != nil {
@@ -580,4 +594,51 @@ func extractModesDirFlag(args []string) []string {
 		}
 	}
 	return out
+}
+
+// errNoComparableCity signals that no attached city can answer a query, so the
+// runner should move on rather than emit an empty table.
+var errNoComparableCity = errors.New("no comparable city")
+
+// buildPerCityUnion expands a single-city query once per attached city and
+// stacks the results with a leading city column.
+//
+// Cities that cannot answer are excluded *by name with a reason*. That
+// reporting is the point: silently dropping a city would make absent data look
+// like a good result, which for a crime or service comparison is the most
+// consequential way this tool could mislead someone.
+func buildPerCityUnion(m *modes.Mode, q modes.Query, aliases []string,
+	bindings []*modes.Binding, quiet bool) (string, error) {
+
+	var parts []string
+	var excluded []string
+	for i, b := range bindings {
+		if ok, why := m.Comparable(q, b); !ok {
+			excluded = append(excluded, fmt.Sprintf("%s (%s)", b.City, why))
+			continue
+		}
+		one, err := modes.ExpandConcepts(q.SQL, aliases[i], b)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf(
+			"SELECT '%s' AS city, * FROM (%s)",
+			strings.ReplaceAll(b.City, "'", "''"), one))
+	}
+
+	if len(excluded) > 0 && !quiet {
+		fmt.Printf("  excluded from this comparison:\n")
+		for _, e := range excluded {
+			fmt.Printf("    - %s\n", e)
+		}
+		fmt.Println()
+	}
+	if len(parts) == 0 {
+		fmt.Fprintf(os.Stderr, "  skipping %s — no attached city can answer it\n\n", q.Name)
+		return "", errNoComparableCity
+	}
+	if len(parts) == 1 && len(bindings) > 1 && !quiet {
+		fmt.Printf("  note: only one city qualifies, so this is not a comparison.\n\n")
+	}
+	return strings.Join(parts, "\nUNION ALL\n"), nil
 }

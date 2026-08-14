@@ -44,9 +44,13 @@ type externalFile struct {
 	Caveats  []string        `yaml:"caveats"`
 
 	// Binding fields (kind: binding)
-	Mode     string                  `yaml:"mode"`
-	Portal   string                  `yaml:"portal"`
-	City     string                  `yaml:"city"`
+	Mode             string `yaml:"mode"`
+	Portal           string `yaml:"portal"`
+	City             string `yaml:"city"`
+	Population       int64  `yaml:"population"`
+	PopulationSource string `yaml:"population_source"`
+
+	//nolint:revive // grouped with the binding fields above for readability.
 	Datasets map[string]externalBind `yaml:"datasets"`
 	Notes    []string                `yaml:"notes"`
 }
@@ -269,6 +273,17 @@ func validateBinding(f *externalFile, path string, standalone bool) error {
 			return fmt.Errorf("%s: dataset %q needs 'id', 'table', and 'name'", base, name)
 		}
 	}
+	// A denominator without a citation cannot be used in a comparison someone
+	// might act on, so the source is mandatory whenever a population is given.
+	if f.Population > 0 && strings.TrimSpace(f.PopulationSource) == "" {
+		return fmt.Errorf("%s: binding for %s sets 'population' but no "+
+			"'population_source'. Record where the figure came from, e.g. "+
+			"\"2020 Decennial Census, table P1\"", base, f.Portal)
+	}
+	if f.PopulationSource != "" && f.Population <= 0 {
+		return fmt.Errorf("%s: binding for %s has a 'population_source' but no "+
+			"'population'", base, f.Portal)
+	}
 
 	// Cross-check against the mode when it is known. During a standalone lint
 	// the mode may live in a file not yet loaded, so an unknown mode is a
@@ -334,12 +349,14 @@ func applyBinding(f *externalFile, path string) error {
 		return err
 	}
 	b := &Binding{
-		Mode:     f.Mode,
-		Portal:   f.Portal,
-		City:     f.City,
-		Notes:    f.Notes,
-		Source:   path,
-		Concepts: make(map[string]BoundDataset, len(f.Datasets)),
+		Mode:             f.Mode,
+		Portal:           f.Portal,
+		City:             f.City,
+		Population:       f.Population,
+		PopulationSource: f.PopulationSource,
+		Notes:            f.Notes,
+		Source:           path,
+		Concepts:         make(map[string]BoundDataset, len(f.Datasets)),
 	}
 	for name, d := range f.Datasets {
 		b.Concepts[name] = BoundDataset{

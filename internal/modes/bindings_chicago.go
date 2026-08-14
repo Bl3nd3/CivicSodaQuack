@@ -13,6 +13,7 @@ package modes
 func init() {
 	registerBinding(chicagoCorruption)
 	registerBinding(chicagoPolice)
+	registerBinding(chicagoRanking)
 }
 
 var chicagoCorruption = &Binding{
@@ -76,5 +77,38 @@ var chicagoPolice = &Binding{
 			"will support analyses Chicago cannot.",
 		"Chicago publishes no use-of-force or tactical-response dataset on this portal, " +
 			"so force is only visible through the police_shooting flag on complaints.",
+	},
+}
+
+var chicagoRanking = &Binding{
+	Mode:   "ranking",
+	Portal: "data.cityofchicago.org",
+	City:   "Chicago, IL",
+	// A denominator without a citation is not usable in a comparison someone
+	// might act on, so the source is recorded alongside the figure.
+	Population:       2746388,
+	PopulationSource: "2020 Decennial Census, table P1",
+	Concepts: map[string]BoundDataset{
+		"crimes": {
+			ID: "ijzp-q8t2", Table: "crimes", Name: "Crimes - 2001 to Present", Rows: 8614139,
+			Notes: "Reported offences as recorded by CPD. Excludes murders where victim " +
+				"data would identify a minor, and the most recent days are incomplete.",
+		},
+		"service_requests": {
+			ID: "v6vf-nfxy", Table: "requests_311", Name: "311 Service Requests", Rows: 14453929,
+			Notes: "Unified 311 system from Dec 2018. Earlier requests live in per-type " +
+				"legacy datasets, so a series crossing 2018 is not continuous.",
+		},
+		"building_permits": {
+			ID: "ydr8-5enu", Table: "building_permits", Name: "Building Permits", Rows: 844259,
+		},
+	},
+	Notes: []string{
+		"Chicago's 311 system was consolidated in December 2018; request volumes " +
+			"before and after are not comparable, and the queries here start in 2019 " +
+			"for that reason.",
+		"Chicago publishes unusually granular crime data. Comparing its reported " +
+			"offence rate against a city publishing less is a comparison of publishing " +
+			"practice as much as of conditions.",
 	},
 }
