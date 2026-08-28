@@ -5,7 +5,7 @@ surface for AI agents. See [AGENTS.md](./AGENTS.md) for the full project brief.
 
 ## Status
 
-**Phase 4** — snapshot publishing. After syncing one or more portals into per-portal DuckDB files, run `csq snapshot` to package one as a `.tar.zst` for distribution; consume with `csq fetch --from <url>`.
+**Phase 7** — snapshot distribution. Sync one or more portals into per-portal DuckDB files, analyse them through curated modes, query them ad hoc with `csq query`, and serve them to agents over MCP (read tools always; write tools when a config is paired with a database). `csq snapshot` packages a portal as a `.tar.zst`; `csq fetch --from <url>` or `--index <url>` consumes one.
 
 Prefer not to use a terminal? `csq web --db <portal.duckdb> --open` serves the same analyses as a local web page.
 
