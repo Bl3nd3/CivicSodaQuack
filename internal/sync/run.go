@@ -46,6 +46,10 @@ type Summary struct {
 	Failed  int
 	Aborted int
 	Wall    time.Duration
+	// Swept records what a previously killed run left behind and this one
+	// cleared. Surfaced rather than silent: finding orphaned rows means a
+	// previous sync died without reporting it, which is worth knowing.
+	Swept duckdb.SweepResult
 }
 
 // Run executes the sync described by cfg. Returns a non-nil error iff any
@@ -66,6 +70,19 @@ func Run(ctx context.Context, cfg *config.Config, d Deps) (Summary, error) {
 		d.Strategy = &IncrementalStrategy{
 			Portal: cfg.Portal, Scheme: scheme, RunID: runID,
 		}
+	}
+
+	// Clear what a previously killed run left behind, before this one writes
+	// anything. Safe here specifically: every caller holds the portal's write
+	// lock, so nothing in _csq_staging can belong to a live sync, and this run
+	// has not created its own staging tables yet. A dry run changes nothing and
+	// so sweeps nothing.
+	if !d.DryRun {
+		swept, err := d.DB.SweepAbandoned(time.Now())
+		if err != nil {
+			return sum, fmt.Errorf("clear abandoned state from a previous run: %w", err)
+		}
+		sum.Swept = swept
 	}
 
 	// Catalog: refresh if asked or cache empty.

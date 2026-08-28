@@ -78,8 +78,10 @@ func runSync(args []string) error {
 	}
 	defer w.Close()
 
+	// Report unfinished runs before the sweep resolves them: after it, the
+	// count is zero and the fact that a previous sync died would vanish.
 	if n, err := w.IncompleteSyncRunCount(); err == nil && n > 0 {
-		fmt.Fprintf(os.Stderr, "[csq] warning: %d prior sync_runs appear incomplete\n", n)
+		fmt.Fprintf(os.Stderr, "[csq] %d prior run(s) never finished; clearing what they left behind\n", n)
 	}
 
 	client := &socrata.Client{AppToken: cfg.AppToken}
@@ -112,6 +114,9 @@ func runSync(args []string) error {
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "[csq] dry-run: would sync %d datasets\n", summary.Planned)
 		return nil
+	}
+	if !summary.Swept.Empty() {
+		fmt.Fprintf(os.Stderr, "[csq] reclaimed %s\n", summary.Swept)
 	}
 	fmt.Fprintf(os.Stderr, "[csq] summary: %d ok, %d failed, %d aborted, wall %s\n",
 		summary.OK, summary.Failed, summary.Aborted, summary.Wall)

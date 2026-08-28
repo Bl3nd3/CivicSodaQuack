@@ -97,3 +97,79 @@ func TestBootstrapSuccess_LeavesNoStaging(t *testing.T) {
 		t.Fatalf("successful bootstrap left %d staging table(s)", n)
 	}
 }
+
+// The strategies drop their own staging table when a sync returns an error, but
+// nothing runs when the process is killed instead. A later run must clear what
+// the dead one left, or the orphans accumulate forever — two interrupted
+// million-row syncs left 8.2 million unreachable rows across two real databases.
+func TestRun_SweepsWreckageFromAKilledRun(t *testing.T) {
+	w, err := duckdb.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer w.Close()
+
+	// Simulate a process that died mid-sync: staging left behind, and a run row
+	// that never reached a terminal status.
+	if _, err := w.DB.Exec(`CREATE TABLE _csq_staging.crimes_DEADRUN (x INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.StartSyncRun("DEADRUN", "aaaa-0001", "crimes", "cfg", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newFakeSocrata(t, mkDataset("aaaa-0001", 3, 0))
+	summary, err := Run(context.Background(), baseCfg(fakeHost(srv)), Deps{
+		DB:       w,
+		Client:   &socrata.Client{BatchSize: 5, MaxRetries: 1},
+		Scheme:   "http",
+		Reporter: &RecordingReporter{},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if summary.Swept.StagingTables != 1 {
+		t.Errorf("swept %d staging tables, want the 1 the dead run left", summary.Swept.StagingTables)
+	}
+	if summary.Swept.AbandonedRuns != 1 {
+		t.Errorf("swept %d abandoned runs, want 1", summary.Swept.AbandonedRuns)
+	}
+	if n := stagingTableCount(t, w); n != 0 {
+		t.Errorf("%d staging table(s) remain after a successful run", n)
+	}
+	if n, _ := w.IncompleteSyncRunCount(); n != 0 {
+		t.Errorf("%d run(s) still report themselves unfinished", n)
+	}
+}
+
+// A dry run inspects; it must not delete another run's working state.
+func TestRun_DryRunDoesNotSweep(t *testing.T) {
+	w, err := duckdb.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer w.Close()
+
+	if _, err := w.DB.Exec(`CREATE TABLE _csq_staging.crimes_OTHER (x INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := newFakeSocrata(t, mkDataset("aaaa-0001", 3, 0))
+	summary, err := Run(context.Background(), baseCfg(fakeHost(srv)), Deps{
+		DB:       w,
+		Client:   &socrata.Client{BatchSize: 5, MaxRetries: 1},
+		Scheme:   "http",
+		Reporter: &RecordingReporter{},
+		DryRun:   true,
+	})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if !summary.Swept.Empty() {
+		t.Errorf("a dry run swept %s", summary.Swept)
+	}
+	if n := stagingTableCount(t, w); n != 1 {
+		t.Errorf("dry run left %d staging tables, want the 1 it found untouched", n)
+	}
+}
