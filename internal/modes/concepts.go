@@ -35,6 +35,13 @@ type BoundDataset struct {
 	// queries can be written once against canonical names. Chicago calls an
 	// offence date `date`; NYC calls it `cmplnt_fr_dt`.
 	//
+	// A value may be any SQL expression over the portal's columns, not only a
+	// column name -- CanonicalView emits it verbatim as `<value> AS <canonical>`.
+	// That is the escape hatch for a portal that publishes the right value in
+	// the wrong type: NYC's DOB permits carry issuance_date as text holding
+	// MM/DD/YYYY, and the binding maps it through try_strptime so the mode's
+	// date arithmetic works without every query learning about that portal.
+	//
 	// When non-empty this map is authoritative: a concept column absent from it
 	// is treated as unavailable on this portal, and any query needing it
 	// excludes the city with a reason. That explicitness matters — assuming a

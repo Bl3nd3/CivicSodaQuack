@@ -103,3 +103,34 @@ func TestQueryUsesColumnWordBoundary(t *testing.T) {
 		t.Error("'arrest' should match as a whole word")
 	}
 }
+
+// TestBindingMayMapAnExpression covers the wrong-type escape hatch. NYC's DOB
+// permit extract publishes issuance_date as text holding MM/DD/YYYY, so the
+// binding maps it through try_strptime. Without that, permit-activity does not
+// merely return odd numbers -- it fails to run, because DuckDB refuses to
+// compare a VARCHAR against a DATE and will not take date_part of one.
+//
+// The bug this locks down was invisible to every existing test: the mapping was
+// a valid column name, the mode was well-formed, and the failure only appeared
+// against real rows from the live portal.
+func TestBindingMayMapAnExpression(t *testing.T) {
+	m, _ := Lookup("ranking")
+	c, ok := m.Concept("building_permits")
+	if !ok {
+		t.Fatal("ranking should declare a building_permits concept")
+	}
+	nyc, err := LookupBinding("ranking", "data.cityofnewyork.us")
+	if err != nil {
+		t.Fatalf("LookupBinding: %v", err)
+	}
+	view := c.CanonicalView("nyc.main.dob_permits", nyc.Concepts["building_permits"])
+
+	const want = "try_strptime(issuance_date, '%m/%d/%Y') AS issue_date"
+	if !strings.Contains(view, want) {
+		t.Errorf("expression mapping not emitted verbatim\nwant substring: %s\ngot: %s", want, view)
+	}
+	// A bare column reference here is the regression: it type-errors at runtime.
+	if strings.Contains(view, "issuance_date AS issue_date") {
+		t.Errorf("issuance_date mapped as a bare column; it is text, not a date: %s", view)
+	}
+}

@@ -51,7 +51,15 @@ var nycRanking = &Binding{
 		"building_permits": {
 			ID: "ipu4-2q9a", Table: "dob_permits", Name: "DOB Permit Issuance", Rows: 3989937,
 			Columns: map[string]string{
-				"issue_date": "issuance_date",
+				// DOB publishes issuance_date as *text* holding MM/DD/YYYY, not a
+				// date, so this maps to a parse expression rather than a column.
+				// Without it permit-activity fails outright -- DuckDB will not
+				// compare VARCHAR '06/17/2020' against a DATE -- and a SoQL range
+				// filter on the raw column compares lexicographically, matching
+				// almost nothing while looking like a valid result. try_strptime
+				// rather than strptime because the column carries unparseable
+				// values that would otherwise abort the whole query.
+				"issue_date": `try_strptime(issuance_date, '%m/%d/%Y')`,
 				// No processing_time equivalent is published.
 			},
 			Notes: "One row per permit issuance including renewals and subtypes, so " +
