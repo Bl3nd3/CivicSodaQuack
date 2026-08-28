@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CivicSodaQuack</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">🦆</span>
+    <span>CivicSodaQuack</span>
+  </div>
+  <div id="portals" class="portals"></div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab" data-view="analyses" role="tab" aria-selected="true">Analyses</button>
+  <button class="tab" data-view="explore"  role="tab" aria-selected="false">Explore data</button>
+  <button class="tab" data-view="health"   role="tab" aria-selected="false">Data health</button>
+</nav>
+
+<main id="main">
+  <section id="view-analyses" class="view"></section>
+  <section id="view-explore"  class="view" hidden></section>
+  <section id="view-health"   class="view" hidden></section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>

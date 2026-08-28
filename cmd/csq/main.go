@@ -35,10 +35,11 @@ Usage:
   csq snapshot-index validate --index <path>
   csq modes    [show|init|run] <mode> [options]
   csq query    --db <portal.duckdb> [--db ...] [--format csv|json|parquet] <SQL>
+  csq web      --db <portal.duckdb> [--db ...] [--config <yaml> ...] [--addr ADDR] [--open]
 
 Modes — curated analysis profiles, ready to sync and query:
   corruption   Contract concentration, lobbying spend, and political contributions
-  ranking      Rank attached portals by breadth, subject coverage, and freshness
+  ranking      Compare cities on crime, 311 responsiveness, and permit activity
   police       Complaints against police, oversight findings, and how they resolve
   research     Audit what you hold, where it came from, and which columns to distrust
 
@@ -59,6 +60,9 @@ Examples:
   csq modes    show police
   csq modes    init police --output police.yaml
   csq modes    run  police --db data.cityofchicago.org.duckdb --query finding-outcomes
+  csq web      --db data.cityofchicago.org.duckdb --open
+
+Not a terminal person? 'csq web' opens the same analyses in a browser.
 `
 
 func main() {
@@ -70,6 +74,11 @@ func main() {
 	case "extract":
 		if err := runExtract(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "csq extract: %v\n", err)
+			os.Exit(1)
+		}
+	case "web":
+		if err := runWeb(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "csq web: %v\n", err)
 			os.Exit(1)
 		}
 	case "catalog":
