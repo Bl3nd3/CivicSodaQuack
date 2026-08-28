@@ -75,6 +75,9 @@ func (s *FullReplaceStrategy) Sync(
 	var rowsWritten int64
 	err = streamInto(ctx, client, s.scheme(), s.Portal, target, w, schema, &rowsWritten, prog, idx, total)
 	if err != nil {
+		// The partial staging table is unreachable from here on: the next run
+		// stages under a fresh run ID, so leaving it only grows the file.
+		_ = w.DropStaging(stagingName)
 		if ctx.Err() != nil {
 			return fail(result, "aborted", ctx.Err()), nil
 		}
@@ -83,6 +86,7 @@ func (s *FullReplaceStrategy) Sync(
 
 	// 6. Swap into main.
 	if err := w.SwapIn(stagingName, target.Effective.Table, ""); err != nil {
+		_ = w.DropStaging(stagingName)
 		return fail(result, "failed", fmt.Errorf("swap: %w", err)), nil
 	}
 

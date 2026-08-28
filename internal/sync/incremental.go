@@ -140,6 +140,9 @@ func (s *IncrementalStrategy) bootstrap(
 		},
 	)
 	if err != nil {
+		// See FullReplaceStrategy: a staging table whose run never swapped is
+		// dead weight that nothing else reclaims.
+		_ = w.DropStaging(stagingName)
 		if ctx.Err() != nil {
 			return failResult(target, "aborted", ctx.Err()), nil
 		}
@@ -147,6 +150,7 @@ func (s *IncrementalStrategy) bootstrap(
 	}
 
 	if err := w.SwapIn(stagingName, target.Effective.Table, schema.PrimaryKey); err != nil {
+		_ = w.DropStaging(stagingName)
 		return failResult(target, "failed", fmt.Errorf("swap: %w", err)), nil
 	}
 

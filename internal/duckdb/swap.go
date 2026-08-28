@@ -46,3 +46,22 @@ func (w *Writer) SwapIn(stagingName, target, primaryKey string) error {
 	}
 	return nil
 }
+
+// DropStaging removes an abandoned staging table.
+//
+// SwapIn drops the staging table it consumes, so the only tables this has to
+// clean up are those whose run never reached the swap. Nothing else reclaims
+// them: each run stages under its own <table>_<runID> name, so a failed run's
+// table is not reused by the next one, and it survives until someone drops the
+// schema. Two interrupted million-row syncs are enough to leave a database
+// carrying hundreds of thousands of rows that no query will ever read.
+//
+// Errors are the caller's to ignore — this runs on the failure path, where the
+// error that got us here is the one worth reporting.
+func (w *Writer) DropStaging(stagingName string) error {
+	_, err := w.DB.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS _csq_staging."%s"`, stagingName))
+	if err != nil {
+		return fmt.Errorf("drop staging.%s: %w", stagingName, err)
+	}
+	return nil
+}
