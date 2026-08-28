@@ -7,6 +7,8 @@ surface for AI agents. See [AGENTS.md](./AGENTS.md) for the full project brief.
 
 **Phase 4** — snapshot publishing. After syncing one or more portals into per-portal DuckDB files, run `csq snapshot` to package one as a `.tar.zst` for distribution; consume with `csq fetch --from <url>`.
 
+Prefer not to use a terminal? `csq web --db <portal.duckdb> --open` serves the same analyses as a local web page.
+
 ## Quickstart
 
 ```bash
@@ -25,6 +27,70 @@ go build -o csq ./cmd/csq
 ```
 
 Set `SOCRATA_APP_TOKEN` (referenced in the YAML as `${SOCRATA_APP_TOKEN}`) to lift anonymous rate limits.
+
+### Use it in a browser
+
+Not everyone wants a terminal. `csq web` serves the same analyses as a local web
+page, from the same binary — no install step, no toolchain, no files next to the
+executable.
+
+```bash
+./csq web --db data.cityofchicago.org.duckdb --open
+```
+
+Three views: **Analyses** (the modes, with a readiness dot so an unsynced
+analysis is never mistaken for one that found nothing), **Explore data** (every
+dataset the portal publishes, and whether you hold a copy), and **Data health**
+(the `research` mode in plain language — what failed, what is missing, which
+columns carry impossible dates).
+
+Two properties are structural rather than incidental:
+
+- **The browser cannot send SQL.** Every endpoint takes a mode name and a query
+  name, and runs the SQL the mode declares. There is no ad-hoc query box, so
+  there is no injection surface, and what runs in the page is exactly what
+  `csq modes run` runs — caveats included.
+- **Caveats and exclusions ship with the rows.** They are fields on the same
+  response, and the page has no code path that renders a table without them. A
+  city excluded from a comparison is named above the numbers, never in a
+  footnote below them.
+
+Pair `--config` with `--db` to let the page download data too:
+
+```bash
+./csq web --db data.cityofchicago.org.duckdb \
+          --config data.cityofchicago.org.yaml --open
+```
+
+An analysis with no data then offers a **Download this data** button that syncs
+just the datasets that analysis needs, with live per-dataset progress. Downloads
+take the same advisory lock `csq sync` takes, and one runs at a time. Without
+`--config` the page is read-only and prints the command instead. If the database
+file does not exist yet, `csq web --db new.duckdb --config portal.yaml` creates
+it — starting from nothing is the case the browser UI exists to serve.
+
+Every database is opened `READ_ONLY` for reading, so this composes with a
+running `csq mcp` or `csq sync` on the same file.
+
+#### Share the results
+
+Any mode renders to a standalone HTML report — inline SVG charts, inline CSS,
+no scripts and no external requests — so it can be emailed, dropped in a shared
+folder, or opened on a machine with no network:
+
+```
+http://127.0.0.1:8080/report/corruption.html?download=1
+```
+
+The report leads with the mode's caveats and prints the full table under every
+chart. Charts are drawn only where the result shape supports one honestly: a
+single label column and a measure. Results with several numeric columns of
+different units stay tables, because the chart that would fit them is a
+dual-axis chart.
+
+The default listen address is loopback. csq has no login, so `--addr` on a wider
+interface publishes every synced dataset to anyone who can reach the port; the
+server warns when you do it.
 
 ### Modes
 
@@ -222,6 +288,8 @@ internal/sync/        # Sync orchestrator + strategies (FullReplace, Incremental
 internal/mcpserver/   # MCP server: pools, ATTACH, tools, transports
 internal/snapshot/    # Snapshot publishing: tar+zst format, Pack producer, Fetch consumer
 internal/modes/       # Curated analysis profiles: datasets, queries, caveats
+internal/analysis/    # Headless mode execution: planning, exclusions, readiness
+internal/web/         # Browser UI: JSON API, embedded assets, HTML reports
 ```
 
 ## License
