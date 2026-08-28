@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/duckdb/duckdb-go/v2"
@@ -63,16 +64,31 @@ type Portal struct {
 // Read-only attach is what lets this run alongside a csq sync or an MCP server
 // holding the same file. Nothing in this package writes.
 type Session struct {
-	host    *sql.DB
+	host *sql.DB
+
+	// mu guards portals, which is no longer fixed at construction: the setup
+	// flow attaches a portal while the server is serving, so every read of the
+	// slice has to take a snapshot rather than range over it directly.
+	mu      sync.RWMutex
 	portals []Portal
 }
 
-// Open attaches every spec READ_ONLY to a fresh in-memory host.
-func Open(specs []DBSpec) (*Session, error) {
-	if len(specs) == 0 {
-		return nil, fmt.Errorf("no portal databases given")
-	}
+// snapshot returns a copy of the attached portals, safe to range over without
+// holding the lock.
+func (s *Session) snapshot() []Portal {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Portal, len(s.portals))
+	copy(out, s.portals)
+	return out
+}
 
+// Open attaches every spec READ_ONLY to a fresh in-memory host.
+//
+// Zero specs is valid and yields an empty session. Someone opening csq for the
+// first time has no database at all, and refusing to start without one would
+// make the setup flow impossible to reach from the page.
+func Open(specs []DBSpec) (*Session, error) {
 	paths := make([]string, len(specs))
 	for i, s := range specs {
 		paths[i] = s.Path
@@ -127,10 +143,41 @@ func (s *Session) Close() error {
 }
 
 // Portals returns the attached portals in attach order.
-func (s *Session) Portals() []Portal {
-	out := make([]Portal, len(s.portals))
-	copy(out, s.portals)
-	return out
+func (s *Session) Portals() []Portal { return s.snapshot() }
+
+// Attach adds a portal to a live session.
+//
+// Used by the setup flow, which creates a database and then has to make it
+// visible without restarting the server.
+func (s *Session) Attach(spec DBSpec) (Portal, error) {
+	if _, err := os.Stat(spec.Path); err != nil {
+		return Portal{}, fmt.Errorf("%s: %w", spec.Path, err)
+	}
+
+	alias := spec.Alias
+	if alias == "" {
+		alias = modes.AliasFor(spec.Path)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.portals {
+		if p.Alias == alias {
+			return Portal{}, fmt.Errorf("a portal is already attached as %q", alias)
+		}
+	}
+	if _, err := s.host.Exec(fmt.Sprintf("ATTACH '%s' AS %s (READ_ONLY)",
+		quoteLiteral(spec.Path), alias)); err != nil {
+		return Portal{}, fmt.Errorf("attach %s: %w", spec.Path, err)
+	}
+
+	portalHost := spec.Portal
+	if portalHost == "" {
+		portalHost = modes.PortalFromDBPath(spec.Path)
+	}
+	p := Portal{Alias: alias, Path: spec.Path, Portal: portalHost, City: cityFor(portalHost)}
+	s.portals = append(s.portals, p)
+	return p, nil
 }
 
 // bindingsFor resolves one binding per attached portal for a concept-based
@@ -139,8 +186,9 @@ func (s *Session) bindingsFor(m *modes.Mode) ([]*modes.Binding, error) {
 	if len(m.Concepts) == 0 {
 		return nil, nil
 	}
-	out := make([]*modes.Binding, len(s.portals))
-	for i, p := range s.portals {
+	ports := s.snapshot()
+	out := make([]*modes.Binding, len(ports))
+	for i, p := range ports {
 		b, err := modes.LookupBinding(m.Name, p.Portal)
 		if err != nil {
 			return nil, err
@@ -176,7 +224,7 @@ func cityFor(portalHost string) string {
 // every other portal for the sake of one.
 func (s *Session) Refresh(alias string) error {
 	var path string
-	for _, p := range s.portals {
+	for _, p := range s.snapshot() {
 		if p.Alias == alias {
 			path = p.Path
 			break
@@ -201,7 +249,7 @@ func (s *Session) Refresh(alias string) error {
 
 // PortalByAlias returns the attached portal with this alias.
 func (s *Session) PortalByAlias(alias string) (Portal, bool) {
-	for _, p := range s.portals {
+	for _, p := range s.snapshot() {
 		if p.Alias == alias {
 			return p, true
 		}

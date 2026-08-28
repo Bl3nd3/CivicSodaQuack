@@ -77,7 +77,7 @@ func (s *Session) SearchCatalog(ctx context.Context, q, category string, limit, 
 	}
 
 	var unions []string
-	for _, p := range s.portals {
+	for _, p := range s.snapshot() {
 		unions = append(unions, fmt.Sprintf(
 			`SELECT '%s' AS portal, '%s' AS alias, id, name, coalesce(description,'') AS description,
 			        coalesce(category,'') AS category, row_count, updated_at
@@ -125,7 +125,7 @@ func (s *Session) SearchCatalog(ctx context.Context, q, category string, limit, 
 // Categories lists the distinct categories across attached portals, with counts.
 func (s *Session) Categories(ctx context.Context) ([]Category, error) {
 	var unions []string
-	for _, p := range s.portals {
+	for _, p := range s.snapshot() {
 		unions = append(unions, fmt.Sprintf(
 			`SELECT coalesce(category,'') AS category FROM %s._csq.catalog`, p.Alias))
 	}
@@ -160,7 +160,7 @@ type Category struct {
 // a run that actually succeeded.
 func (s *Session) syncedTables(ctx context.Context) (map[string]string, error) {
 	out := map[string]string{}
-	for _, p := range s.portals {
+	for _, p := range s.snapshot() {
 		rows, err := s.host.QueryContext(ctx, fmt.Sprintf(
 			`SELECT DISTINCT dataset_id, table_name FROM %s._csq.sync_runs
 			 WHERE status = 'ok' AND table_name IS NOT NULL`, p.Alias))

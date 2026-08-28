@@ -6,7 +6,10 @@
 'use strict';
 
 const $ = (sel, el = document) => el.querySelector(sel);
-const state = { portals: [], modes: [], view: 'analyses', syncEnabled: false, job: null };
+const state = {
+  portals: [], modes: [], view: 'analyses',
+  syncEnabled: false, canSetup: false, cities: [], job: null,
+};
 
 // ---------------------------------------------------------------- utilities
 
@@ -63,8 +66,12 @@ const isNum = (v) => typeof v === 'number';
 
 function renderPortals() {
   const box = $('#portals');
-  mount(box, ...state.portals.map((p) =>
-    el('span', { class: 'chip', title: p.path }, el('b', {}, p.city || p.portal))));
+  mount(box,
+    ...state.portals.map((p) =>
+      el('span', { class: 'chip', title: p.path }, el('b', {}, p.city || p.portal))),
+    state.canSetup
+      ? el('button', { class: 'chip chip-btn', onclick: () => renderSetup() }, '+ Add a city')
+      : null);
 }
 
 const VIEWS = ['analyses', 'explore', 'health'];
@@ -89,15 +96,24 @@ function setURL(params) {
   history.replaceState(null, '', url);
 }
 
-function switchView(name, updateURL = true) {
+// showViewChrome moves the tab highlight and visibility without rendering
+// anything into the panel. Kept separate from switchView so a renderer can put
+// itself on screen without re-entering the dispatch that called it — the setup
+// flow lives inside the analyses tab, and having it call switchView made the
+// two call each other forever.
+function showViewChrome(name) {
   state.view = name;
-  if (updateURL) setURL({ view: name });
   for (const tab of document.querySelectorAll('.tab')) {
     tab.setAttribute('aria-selected', String(tab.dataset.view === name));
   }
   for (const v of document.querySelectorAll('.view')) {
     v.hidden = v.id !== `view-${name}`;
   }
+}
+
+function switchView(name, updateURL = true) {
+  showViewChrome(name);
+  if (updateURL) setURL({ view: name });
   if (name === 'analyses') renderAnalyses();
   if (name === 'explore') renderExplore();
   if (name === 'health') renderHealth();
@@ -106,6 +122,11 @@ function switchView(name, updateURL = true) {
 // ---------------------------------------------------------------- analyses
 
 function renderAnalyses() {
+  // With nothing loaded there are no analyses to list, and a grid of greyed
+  // cards explaining why is a worse first impression than simply asking the
+  // question that gets someone started.
+  if (!state.portals.length && state.canSetup) return renderSetup();
+
   setURL({ view: 'analyses' });
   const root = $('#view-analyses');
   mount(root,
@@ -176,6 +197,87 @@ function showMode(m, autoQuery = null) {
   );
 }
 
+// ---------------------------------------------------------------- setup
+
+// renderSetup is the first-run flow: pick a city, pick an analysis, see what it
+// will cost, confirm.
+//
+// It exists because everything else in csq assumes you already have a database,
+// and getting the first one required knowing that `csq modes init` writes a
+// YAML that `csq sync` then consumes. That is three pieces of vocabulary before
+// a single number appears on screen.
+function renderSetup(city = null) {
+  showViewChrome('analyses');
+  setURL({ view: 'analyses', setup: '1' });
+  const root = $('#view-analyses');
+
+  if (!city) {
+    mount(root,
+      state.portals.length
+        ? el('button', { class: 'back', onclick: renderAnalyses }, '← Back to analyses')
+        : null,
+      el('h1', {}, 'Pick a city'),
+      el('p', { class: 'lede' },
+        'csq knows how to map these cities\u2019 published data onto its analyses. ' +
+        'Pick one and it will download what that analysis needs \u2014 no configuration files, ' +
+        'no dataset ids.'),
+      el('div', { class: 'cards' }, state.cities.map((c) =>
+        el('button', { class: 'card', onclick: () => renderSetup(c) },
+          el('h3', {}, c.city),
+          el('p', {}, `${c.analyses.length} ${c.analyses.length === 1 ? 'analysis' : 'analyses'} available`),
+          el('div', { class: 'status' },
+            el('i', { class: `dot ${c.attached ? 'ready' : ''}` }),
+            c.attached ? 'already loaded' : c.portal)))));
+    return;
+  }
+
+  mount(root,
+    el('button', { class: 'back', onclick: () => renderSetup() }, '← All cities'),
+    el('h1', {}, city.city),
+    el('p', { class: 'lede' },
+      'Pick what you want to look at. csq will download only the datasets that ' +
+      'analysis needs, and tell you what it is doing while it does it.'),
+    el('div', { class: 'qlist' }, city.analyses.map((a) =>
+      el('button', { class: 'qrow', onclick: () => confirmSetup(city, a) },
+        el('b', {}, a.title.split('\u2014')[0].trim()),
+        el('span', {}, a.summary),
+        el('div', { class: 'status', style: 'margin-top:8px; gap:8px; display:flex' },
+          el('span', { class: 'badge' }, `${a.datasets} datasets`),
+          el('span', { class: 'badge' }, `~${fmt.format(a.approx_rows)} rows`),
+          el('span', { class: 'badge' }, a.approx_time))))),
+    el('div', { id: 'jobpanel' }));
+}
+
+// confirmSetup states the cost before committing to it. A download measured in
+// tens of minutes should not start because someone clicked a card.
+function confirmSetup(city, a) {
+  const panel = $('#jobpanel');
+  mount(panel, el('div', { class: 'callout' },
+    el('strong', {}, `Download ${a.datasets} datasets for ${city.city}?`),
+    `About ${fmt.format(a.approx_rows)} rows, roughly ${a.approx_time}. ` +
+    'You can stop it at any point, and anything already downloaded is kept.',
+    el('div', { style: 'margin-top:10px; display:flex; gap:8px' },
+      el('button', {
+        class: 'btn', id: 'getdata',
+        onclick: async () => {
+          const btn = $('#getdata');
+          if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+          try {
+            await api('/api/setup', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ portal: city.portal, mode: a.mode }),
+            });
+            state.syncEnabled = true;
+            ensureSyncStream();
+          } catch (err) {
+            mount(panel, errorNode(err));
+          }
+        },
+      }, 'Start the download'),
+      el('button', { class: 'btn secondary', onclick: () => renderSetup(city) }, 'Cancel'))));
+}
+
 // notReadyPanel is the dead end turned into a next step. With --config the
 // page can fetch the data itself; without it, the panel prints the command that
 // does, because telling someone what is missing without telling them how to get
@@ -207,6 +309,7 @@ async function startSync(m) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ mode: m.name, alias: state.portals[0]?.alias }),
     });
+    ensureSyncStream();
   } catch (err) {
     mount($('#jobpanel'), errorNode(err));
     if (btn) { btn.disabled = false; btn.textContent = 'Download this data'; }
@@ -222,6 +325,7 @@ function renderJob(job) {
   if (!panel || !job) return;
 
   const done = job.state !== 'running';
+  if (done) closeSyncStream();
   const btn = $('#getdata');
   if (btn) {
     btn.disabled = !done;
@@ -253,20 +357,40 @@ function renderJob(job) {
 // reloadModes re-reads readiness after a download so the page reflects the data
 // that just landed rather than the state it opened with.
 async function reloadModes() {
-  const { modes } = await api('/api/modes');
+  const [{ portals }, { modes }, avail] = await Promise.all([
+    api('/api/portals'), api('/api/modes'), api('/api/available'),
+  ]);
+  state.portals = portals;
   state.modes = modes;
+  state.cities = avail.cities;
+  renderPortals();
   const current = new URLSearchParams(location.search).get('mode');
   const m = modes.find((x) => x.name === current);
   if (m) showMode(m); else renderAnalyses();
 }
 
-// listenForSyncEvents keeps the page in step with a download started here, in
-// another tab, or before this page was opened.
-function listenForSyncEvents() {
-  const src = new EventSource('/api/sync/events');
-  src.onmessage = (e) => {
+// The event stream is opened only while a download is actually running, and
+// closed when it reaches a terminal state.
+//
+// An always-open EventSource is a connection held for something that is not
+// happening: it keeps the page permanently "loading" to anything measuring
+// network idle, and it costs a server goroutine and a subscriber slot per open
+// tab for no benefit.
+let syncStream = null;
+
+function ensureSyncStream() {
+  if (syncStream) return;
+  syncStream = new EventSource('/api/sync/events');
+  syncStream.onmessage = (e) => {
     try { renderJob(JSON.parse(e.data)); } catch { /* ignore a partial frame */ }
   };
+  syncStream.onerror = () => { /* EventSource reconnects on its own */ };
+}
+
+function closeSyncStream() {
+  if (!syncStream) return;
+  syncStream.close();
+  syncStream = null;
 }
 
 async function runQuery(m, q, anchor) {
@@ -323,21 +447,90 @@ function resultNodes(res, q) {
 
   if (res.chart) nodes.push(...chartNodes(res));
   nodes.push(tableNode(res));
-  nodes.push(el('p', { class: 'muted' },
-    `${fmt.format(res.rows.length)} rows · ${res.elapsed}` +
-    (res.truncated ? ' · showing the first rows only' : '')));
+
+  // Export runs the query again server-side with a far higher row cap, so what
+  // downloads is the whole result rather than the page's 1000-row view.
+  nodes.push(el('div', { class: 'toolbar' },
+    el('a', { class: 'btn secondary', href: `/export/${res.mode}/${res.query}.csv` },
+      'Download CSV'),
+    el('a', { class: 'btn secondary', href: `/export/${res.mode}/${res.query}.json` },
+      'Download JSON'),
+    el('span', { class: 'muted' },
+      `ran in ${res.elapsed}` +
+      (res.truncated ? ' · the page shows the first 1,000 rows; the download has the rest' : ''))));
   return nodes;
 }
 
+// tableNode renders a result as a sortable, filterable table.
+//
+// Sorting and filtering happen on the rows already in the browser and never
+// re-run the query. That keeps them instant, and it keeps the guarantee that
+// the page cannot author SQL: rearranging rows you were already given is not
+// the same as asking a new question.
+//
+// The caption below the table always states how many rows the view is showing
+// out of how many were returned, because a filtered table that does not say it
+// is filtered is a straightforwardly misleading object.
 function tableNode(res) {
   const numeric = res.columns.map((_, i) => res.rows.some((r) => isNum(r[i])));
-  return el('div', { class: 'tablewrap' },
-    el('table', {},
+  const view = { sort: null, dir: 1, filter: '' };
+
+  const wrap = el('div', { class: 'tablewrap' });
+  const caption = el('p', { class: 'muted' });
+  const filterBox = el('input', {
+    type: 'search',
+    placeholder: 'Filter these rows…',
+    oninput: debounce((e) => { view.filter = e.target.value.toLowerCase(); draw(); }, 150),
+  });
+
+  function visibleRows() {
+    let rows = res.rows;
+    if (view.filter) {
+      rows = rows.filter((r) => r.some((v) =>
+        v != null && String(v).toLowerCase().includes(view.filter)));
+    }
+    if (view.sort != null) {
+      const i = view.sort;
+      // Copy before sorting: res.rows is also what the chart reads, and
+      // reordering it underneath would make the two disagree.
+      rows = rows.slice().sort((a, b) => {
+        const x = a[i], y = b[i];
+        if (x == null && y == null) return 0;
+        if (x == null) return 1;   // nulls last, whichever way it is sorted
+        if (y == null) return -1;
+        if (isNum(x) && isNum(y)) return (x - y) * view.dir;
+        return String(x).localeCompare(String(y)) * view.dir;
+      });
+    }
+    return rows;
+  }
+
+  function draw() {
+    const rows = visibleRows();
+    mount(wrap, el('table', {},
       el('thead', {}, el('tr', {}, res.columns.map((c, i) =>
-        el('th', { class: numeric[i] ? 'num' : '' }, c)))),
-      el('tbody', {}, res.rows.map((r) =>
+        el('th', {
+          class: (numeric[i] ? 'num ' : '') + 'sortable',
+          title: `Sort by ${c}`,
+          onclick: () => {
+            view.dir = view.sort === i ? -view.dir : (numeric[i] ? -1 : 1);
+            view.sort = i;
+            draw();
+          },
+        }, c, view.sort === i ? el('span', { class: 'arrow' }, view.dir > 0 ? '▲' : '▼') : null)))),
+      el('tbody', {}, rows.map((r) =>
         el('tr', {}, r.map((v, i) =>
           el('td', { class: numeric[i] ? 'num' : '' }, formatCell(v))))))));
+
+    caption.textContent = rows.length === res.rows.length
+      ? `${fmt.format(rows.length)} rows`
+      : `${fmt.format(rows.length)} of ${fmt.format(res.rows.length)} rows shown`;
+  }
+
+  draw();
+  return el('div', {},
+    el('div', { class: 'toolbar' }, filterBox),
+    wrap, caption);
 }
 
 // Horizontal bars, drawn from the column choice the server made. The rules
@@ -527,17 +720,27 @@ async function boot() {
     tab.addEventListener('click', () => switchView(tab.dataset.view));
   }
   try {
-    const [{ portals }, { modes }, syncStatus] = await Promise.all([
+    const [{ portals }, { modes }, syncStatus, avail] = await Promise.all([
       api('/api/portals'), api('/api/modes'), api('/api/sync/status'),
+      api('/api/available'),
     ]);
     state.portals = portals;
     state.modes = modes;
     state.syncEnabled = syncStatus.enabled;
-    if (state.syncEnabled) listenForSyncEvents();
+    state.canSetup = avail.can_setup;
+    state.cities = avail.cities;
+    // Only attach to the stream if something is actually running — a download
+    // started before this page was opened, or in another tab.
+    if (syncStatus.job && syncStatus.job.state === 'running') ensureSyncStream();
     renderPortals();
     // Read the deep link before rendering: renderAnalyses rewrites the URL to
     // the bare tab, which would erase the very parameters being honoured.
     const p = new URLSearchParams(location.search);
+    if (p.get('setup') && state.canSetup) {
+      renderPortals();
+      renderSetup();
+      return;
+    }
     switchView(viewFromURL(), false);
 
     // A link may point at one analysis, or at one question inside it.

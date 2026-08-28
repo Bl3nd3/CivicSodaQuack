@@ -184,3 +184,15 @@ input[type="search"]:focus-visible, select:focus-visible { outline: 2px solid va
 .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--surface-3); color: var(--text-secondary); }
 .badge.have { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .spinner { color: var(--text-muted); padding: 24px 0; }
+
+/* Sortable headers. The arrow is the only affordance a table header gets --
+   an underline or a button chrome would compete with the data for attention. */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text-primary); }
+th .arrow { margin-left: 5px; font-size: 10px; color: var(--accent); }
+
+/* The "add a city" chip sits among the portal chips because that is where a
+   reader looks to find out what is loaded, and adding one is the same subject. */
+.chip-btn { cursor: pointer; font: inherit; font-size: 13px; color: var(--accent); border-color: var(--accent); background: none; }
+.chip-btn:hover { background: var(--accent-soft); }
+.chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

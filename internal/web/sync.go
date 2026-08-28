@@ -179,7 +179,9 @@ func (r *webReporter) DatasetDone(idx, total int, t syncpkg.DatasetTarget, res s
 // startSync begins a sync for one portal, optionally narrowed to the datasets
 // one mode needs.
 func (s *Server) startSync(alias string, mode string) (*Job, error) {
+	s.cfgMu.RLock()
 	cfg, ok := s.configs[alias]
+	s.cfgMu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf(
 			"downloading data is not enabled for this portal; restart with: csq web --db <file> --config <portal.yaml>")

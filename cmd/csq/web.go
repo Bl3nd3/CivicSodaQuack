@@ -23,10 +23,14 @@ import (
 const webUsage = `csq web — browse and run analyses in a web browser
 
 Usage:
-  csq web --db <portal.duckdb> [--db alias=file ...] [options]
+  csq web [--db <portal.duckdb> ...] [options]
 
 Options:
-  --db      Portal DuckDB to open (repeatable; 'path' or 'alias=path')
+  --db      Portal DuckDB to open (repeatable; 'path' or 'alias=path').
+            Omit it entirely and the page walks you through picking a
+            city and downloading its data.
+  --data-dir  Where to create databases and configs when setting up a
+            city from the page (default: the current directory)
   --config  Portal YAML (repeatable; paired positionally with --db).
             Without it the page is read-only; with it, data can be
             downloaded from the page.
@@ -46,6 +50,7 @@ csq has no login, so binding a wider address publishes every synced dataset to
 anyone who can reach the port.
 
 Examples:
+  csq web --open                      # start from nothing; pick a city in the page
   csq web --db data.cityofchicago.org.duckdb --open
   csq web --db chicago=data.cityofchicago.org.duckdb \
           --db nyc=data.cityofnewyork.us.duckdb
@@ -60,6 +65,7 @@ func runWeb(args []string) error {
 		configPaths []string
 		portal      string
 		addr        string
+		dataDir     string
 		openPage    bool
 	)
 	fs.StringArrayVar(&dbArgs, "db", nil, "Portal DuckDB to open (repeatable)")
@@ -67,15 +73,23 @@ func runWeb(args []string) error {
 		"Portal YAML (repeatable; paired with --db; enables downloading)")
 	fs.StringVar(&portal, "portal", "", "Socrata host this DB came from")
 	fs.StringVar(&addr, "addr", web.DefaultAddr, "Listen address")
+	fs.StringVar(&dataDir, "data-dir", "",
+		"Where to create databases when setting up a city from the page")
 	fs.BoolVar(&openPage, "open", false, "Open the page in your browser")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, webUsage) }
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if len(dbArgs) == 0 {
-		fmt.Fprint(os.Stderr, webUsage)
-		return fmt.Errorf("--db is required (at least one portal DuckDB)")
+	// No --db is the first-run case, not an error: the page offers to set a
+	// city up, and requiring a database before it can do so would mean the
+	// setup flow could never be reached by the people who need it.
+	if len(dbArgs) == 0 && dataDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("determine working directory: %w", err)
+		}
+		dataDir = cwd
 	}
 	if portal != "" && len(dbArgs) != 1 {
 		return fmt.Errorf("--portal applies to a single --db; %d were given", len(dbArgs))
@@ -100,7 +114,7 @@ func runWeb(args []string) error {
 	}
 
 	srv, err := web.New(web.Options{
-		DBs: specs, Addr: addr, Out: os.Stderr, Configs: configs,
+		DBs: specs, Addr: addr, Out: os.Stderr, Configs: configs, DataDir: dataDir,
 	})
 	if err != nil {
 		return err

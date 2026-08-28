@@ -79,8 +79,13 @@ func (s *Session) statusFor(ctx context.Context, m *modes.Mode, present map[stri
 	}
 
 	// A single-portal mode cannot run against several attached databases.
-	if !m.MultiPortal && len(s.portals) != 1 {
-		st.Reason = fmt.Sprintf("targets a single portal; %d are attached", len(s.portals))
+	ports := s.snapshot()
+	if len(ports) == 0 {
+		st.Reason = "no data is loaded yet"
+		return st
+	}
+	if !m.MultiPortal && len(ports) != 1 {
+		st.Reason = fmt.Sprintf("targets a single portal; %d are attached", len(ports))
 		return st
 	}
 
@@ -93,14 +98,14 @@ func (s *Session) statusFor(ctx context.Context, m *modes.Mode, present map[stri
 
 	bindings, err := s.bindingsFor(m)
 	if err != nil {
-		st.Reason = plainBindingError(err, s.portals)
+		st.Reason = plainBindingError(err, ports)
 		return st
 	}
 	st.Applicable = true
 
 	ready := true
 	for i, b := range bindings {
-		alias := s.portals[i].Alias
+		alias := ports[i].Alias
 		for _, cname := range conceptNames(m) {
 			bd, bound := b.Concepts[cname]
 			if !bound {
@@ -124,8 +129,8 @@ func (s *Session) statusFor(ctx context.Context, m *modes.Mode, present map[stri
 	if !ready {
 		st.Reason = "datasets for this analysis have not been synced yet"
 		portal := ""
-		if len(s.portals) > 0 {
-			portal = s.portals[0].Portal
+		if len(ports) > 0 {
+			portal = ports[0].Portal
 		}
 		st.FixCommand = (&NotSyncedError{Mode: m.Name, Portal: portal}).FixCommand()
 	}
@@ -141,7 +146,7 @@ func (s *Session) statusFor(ctx context.Context, m *modes.Mode, present map[stri
 // every page load.
 func (s *Session) tableRowCounts(ctx context.Context) (map[string]int64, error) {
 	out := map[string]int64{}
-	for _, p := range s.portals {
+	for _, p := range s.snapshot() {
 		rows, err := s.host.QueryContext(ctx, fmt.Sprintf(
 			`SELECT table_name, estimated_size FROM duckdb_tables()
 			 WHERE database_name = '%s' AND schema_name = 'main'`, quoteLiteral(p.Alias)))

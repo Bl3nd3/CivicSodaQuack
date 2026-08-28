@@ -35,6 +35,19 @@ page, from the same binary — no install step, no toolchain, no files next to t
 executable.
 
 ```bash
+./csq web --open        # start from nothing — the page walks you through it
+```
+
+With no `--db`, the page opens on a **city picker**: choose a city, choose an
+analysis, see how many datasets and roughly how long it will take, confirm. csq
+creates the database, writes the same YAML `csq modes init` would have written,
+and downloads only what that analysis needs. The config is written to disk on
+purpose — whatever you set up in the page stays drivable from the command line,
+because a UI that creates state its own CLI cannot see is a trap.
+
+Point it at databases you already have instead:
+
+```bash
 ./csq web --db data.cityofchicago.org.duckdb --open
 ```
 
@@ -55,7 +68,17 @@ Two properties are structural rather than incidental:
   city excluded from a comparison is named above the numbers, never in a
   footnote below them.
 
-Pair `--config` with `--db` to let the page download data too:
+Result tables sort by any column and filter as you type, both done on the rows
+already in the browser — rearranging rows you were already given is not the same
+as asking a new question, so this needs no SQL and stays instant. Any result
+downloads as **CSV or JSON**, re-run server-side with a much higher row cap than
+the page shows. Both formats carry the caveats and the excluded cities: CSV as
+comment rows above the header, JSON as fields. An export that dropped them would
+turn a hedged answer into a bare spreadsheet, which is how these numbers get
+misquoted.
+
+Pair `--config` with `--db` to let the page download data for databases you
+named yourself:
 
 ```bash
 ./csq web --db data.cityofchicago.org.duckdb \
@@ -65,9 +88,9 @@ Pair `--config` with `--db` to let the page download data too:
 An analysis with no data then offers a **Download this data** button that syncs
 just the datasets that analysis needs, with live per-dataset progress. Downloads
 take the same advisory lock `csq sync` takes, and one runs at a time. Without
-`--config` the page is read-only and prints the command instead. If the database
-file does not exist yet, `csq web --db new.duckdb --config portal.yaml` creates
-it — starting from nothing is the case the browser UI exists to serve.
+`--config` — and without the city picker, which `--db` turns off — the page is
+read-only and prints the command instead. `csq web --db new.duckdb --config
+portal.yaml` creates the database if it does not exist yet.
 
 Every database is opened `READ_ONLY` for reading, so this composes with a
 running `csq mcp` or `csq sync` on the same file.

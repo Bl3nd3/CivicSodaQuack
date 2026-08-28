@@ -56,9 +56,60 @@ func TestOpen_RejectsMissingFile(t *testing.T) {
 	}
 }
 
-func TestOpen_RejectsEmptySpecs(t *testing.T) {
-	if _, err := Open(nil); err == nil {
-		t.Fatal("expected an error when no database is given")
+// An empty session is valid. Someone opening csq for the first time has no
+// database at all, and the setup flow that creates one lives inside the page —
+// so refusing to start without a database would make it unreachable.
+func TestOpen_AllowsAnEmptySession(t *testing.T) {
+	s, err := Open(nil)
+	if err != nil {
+		t.Fatalf("an empty session must be valid: %v", err)
+	}
+	defer s.Close()
+	if len(s.Portals()) != 0 {
+		t.Fatalf("got %d portals, want none", len(s.Portals()))
+	}
+
+	// Statuses must still answer, saying there is nothing loaded rather than
+	// failing or claiming a mode is ready.
+	sts, err := s.ModeStatuses(context.Background())
+	if err != nil {
+		t.Fatalf("statuses on an empty session: %v", err)
+	}
+	for _, st := range sts {
+		if st.Ready {
+			t.Errorf("mode %q reports ready with no data attached", st.Name)
+		}
+	}
+}
+
+// Attach makes a database visible to a session that is already serving.
+func TestAttach_AddsAPortalAtRuntime(t *testing.T) {
+	s, err := Open(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	path := newCSQDB(t, "data.cityofchicago.org.duckdb")
+	p, err := s.Attach(DBSpec{Path: path})
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	if p.Portal != "data.cityofchicago.org" || p.City != "Chicago, IL" {
+		t.Errorf("attached portal = %+v", p)
+	}
+	if len(s.Portals()) != 1 {
+		t.Fatalf("got %d portals, want 1", len(s.Portals()))
+	}
+
+	// The same file twice would collide on its alias.
+	if _, err := s.Attach(DBSpec{Path: path}); err == nil {
+		t.Error("expected a collision when attaching the same alias twice")
+	}
+
+	// And the newly attached portal must actually be queryable.
+	if _, err := s.Run(context.Background(), "research", "coverage-gaps", 5); err != nil {
+		t.Errorf("query after attach: %v", err)
 	}
 }
 

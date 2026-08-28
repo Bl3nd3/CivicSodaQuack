@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neomantra/CivicSodaQuack/internal/analysis"
@@ -41,6 +42,10 @@ type Options struct {
 	DBs []analysis.DBSpec
 	// Addr is the listen address. Defaults to loopback.
 	Addr string
+	// DataDir is where the setup flow creates new databases and configs. Empty
+	// disables setup, which is the case whenever --db was given explicitly:
+	// someone who named their databases did not ask csq to invent more.
+	DataDir string
 	// Configs maps a portal alias to its sync config. A portal without one is
 	// read-only in the UI: it can be explored and analysed, but not downloaded
 	// into, exactly as csq mcp gates its write tools.
@@ -61,6 +66,10 @@ type Server struct {
 	mux     *http.ServeMux
 	out     *os.File
 	addr    string
+	dataDir string
+
+	// cfgMu guards configs, which the setup flow writes while handlers read it.
+	cfgMu   sync.RWMutex
 	configs map[string]*config.Config
 	syncs   *syncManager
 }
@@ -81,7 +90,7 @@ func New(opts Options) (*Server, error) {
 	}
 	s := &Server{
 		sess: sess, mux: http.NewServeMux(), out: out, addr: opts.Addr,
-		configs: cfgs, syncs: newSyncManager(),
+		dataDir: opts.DataDir, configs: cfgs, syncs: newSyncManager(),
 	}
 	s.routes()
 	return s, nil
@@ -108,11 +117,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/run", s.handleRun)
 	s.mux.HandleFunc("/api/catalog", s.handleCatalog)
 	s.mux.HandleFunc("/api/categories", s.handleCategories)
+	s.mux.HandleFunc("/api/available", s.handleAvailable)
+	s.mux.HandleFunc("/api/setup", s.handleSetup)
 	s.mux.HandleFunc("/api/sync", s.handleSyncStart)
 	s.mux.HandleFunc("/api/sync/status", s.handleSyncStatus)
 	s.mux.HandleFunc("/api/sync/stop", s.handleSyncStop)
 	s.mux.HandleFunc("/api/sync/events", s.handleSyncEvents)
 	s.mux.HandleFunc("/report/", s.handleReport)
+	s.mux.HandleFunc("/export/", s.handleExport)
 
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -153,7 +165,10 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 		fmt.Fprintf(s.out, "    • %s  (%s)\n", label, p.Path)
 	}
-	if len(s.configs) == 0 {
+	if len(s.sess.Portals()) == 0 {
+		fmt.Fprintf(s.out,
+			"\n  No data yet — the page will walk you through picking a city.\n")
+	} else if len(s.configs) == 0 && s.dataDir == "" {
 		fmt.Fprintf(s.out,
 			"\n  Read-only: pass --config <portal.yaml> to download data from the page.\n")
 	}

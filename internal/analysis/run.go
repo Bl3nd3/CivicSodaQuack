@@ -62,8 +62,9 @@ func (s *Session) PlanQuery(m *modes.Mode, q modes.Query) (*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	aliases := make([]string, len(s.portals))
-	for i, p := range s.portals {
+	ports := s.snapshot()
+	aliases := make([]string, len(ports))
+	for i, p := range ports {
 		aliases[i] = p.Alias
 	}
 
@@ -133,9 +134,13 @@ func (s *Session) Run(ctx context.Context, modeName, queryName string, limit int
 	if err != nil {
 		return nil, err
 	}
-	if !m.MultiPortal && len(s.portals) != 1 {
+	ports := s.snapshot()
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("no data is loaded yet")
+	}
+	if !m.MultiPortal && len(ports) != 1 {
 		return nil, fmt.Errorf("mode %q targets a single portal; %d are attached",
-			m.Name, len(s.portals))
+			m.Name, len(ports))
 	}
 
 	plan, err := s.PlanQuery(m, *q)
@@ -150,7 +155,7 @@ func (s *Session) Run(ctx context.Context, modeName, queryName string, limit int
 	started := time.Now()
 	cols, rows, err := s.query(ctx, capped)
 	if err != nil {
-		return nil, annotateMissingTable(err, m, s.portals)
+		return nil, annotateMissingTable(err, m, ports)
 	}
 
 	res := &Result{
