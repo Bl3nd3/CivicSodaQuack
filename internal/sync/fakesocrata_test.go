@@ -84,10 +84,13 @@ func newFakeSocrata(t *testing.T, datasets ...fakeDataset) *httptest.Server {
 		whereClause := q.Get("$where")
 		includeSystem := selectClause == ":*,*"
 
-		if d.FailAtOffset > 0 && offset >= d.FailAtOffset {
-			http.Error(w, "synthetic failure", 500)
-			return
-		}
+		// csq pages by seeking on :id rather than by $offset (see
+		// StreamRowsCtx), so the seek term is split off here and the row it
+		// names becomes the effective start of the page. Modelling this is
+		// what keeps FailAtOffset meaningful: without it the fake would serve
+		// page one for ever and no paging test would exercise anything.
+		userWhere, seekID := splitKeysetSeek(whereClause)
+		whereClause = userWhere
 
 		// Apply $where filter if present
 		filtered := d.Rows
@@ -107,6 +110,21 @@ func newFakeSocrata(t *testing.T, datasets ...fakeDataset) *httptest.Server {
 					filtered = append(filtered, row)
 				}
 			}
+		}
+
+		// A seek overrides $offset: resume just past the named row.
+		if seekID != "" {
+			offset = len(filtered) // unknown id => nothing left to serve
+			for i, row := range filtered {
+				if row[":id"] == seekID {
+					offset = i + 1
+					break
+				}
+			}
+		}
+		if d.FailAtOffset > 0 && offset >= d.FailAtOffset {
+			http.Error(w, "synthetic failure", 500)
+			return
 		}
 
 		// Page slice
@@ -166,6 +184,17 @@ func makeRows(n int, mk func(i int) map[string]any) []map[string]any {
 //	<col> > '<value>'   (with surrounding whitespace ignored)
 //
 // Returns the value if matched. Anything else returns ok=false.
+// splitKeysetSeek separates a keyset seek from the caller's own predicate.
+// csq emits either ":id > 'x'" or "(<user where>) AND :id > 'x'".
+func splitKeysetSeek(where string) (userWhere, seekID string) {
+	re := regexp.MustCompile(`^\s*(?:\((.*)\)\s+AND\s+)?:id\s*>\s*'([^']*)'\s*$`)
+	m := re.FindStringSubmatch(where)
+	if m == nil {
+		return where, ""
+	}
+	return m[1], m[2]
+}
+
 func parseSimpleGreaterThan(where string) (string, bool) {
 	re := regexp.MustCompile(`^\s*[A-Za-z_:][A-Za-z0-9_:]*\s*>\s*'([^']*)'\s*$`)
 	m := re.FindStringSubmatch(where)
