@@ -9,16 +9,23 @@ import (
 	"time"
 )
 
-// rateSignal scores a "fraction of rows that are wrong" measurement.
+// rateSignal turns a "fraction of rows that are wrong" measurement into a
+// retention factor through the model's transfer function:
 //
-// Three thresholds rather than two, because the level and the score answer
-// different questions. passUnder and warnUnder decide what the reader is told;
-// zeroAt decides how fast the arithmetic gives up. Keeping them separate is
-// what stops a signal from being labelled a failure while still scoring 0.99.
+//	r = 1 - (1 - floor) × min(1, rate / zeroAt)
+//
+// r falls linearly from 1 at rate 0 to floor at rate zeroAt, and stays at the
+// floor beyond it. Continuous and monotone, so more of a defect always costs
+// more, and never in a jump.
+//
+// The level thresholds are separate from the arithmetic on purpose. passUnder
+// and warnUnder decide what the reader is told; floor and zeroAt decide what
+// the score does. Conflating them is what produced a signal labelled a failure
+// while still scoring 0.99 in the averaged model.
 func rateSignal(name, label, detail, dataset string, rate float64,
-	passUnder, warnUnder, zeroAt, weight float64) Signal {
+	passUnder, warnUnder, zeroAt, floor float64) Signal {
 
-	s := Signal{Name: name, Label: label, Detail: detail, Dataset: dataset, Weight: weight}
+	s := Signal{Name: name, Label: label, Detail: detail, Dataset: dataset, Floor: floor}
 	switch {
 	case rate < passUnder:
 		s.Level = Pass
@@ -27,14 +34,24 @@ func rateSignal(name, label, detail, dataset string, rate float64,
 	default:
 		s.Level = Fail
 	}
-	s.Score = 1 - rate/zeroAt
-	if s.Score < 0 {
-		s.Score = 0
-	}
-	if s.Score > 1 {
-		s.Score = 1
-	}
+	s.Score = retain(floor, rate/zeroAt)
 	return s
+}
+
+// retain is the transfer function: severity 0 keeps everything, severity 1 or
+// more costs the whole of what this check can take.
+func retain(floor, severity float64) float64 {
+	// The endpoints are returned exactly rather than computed. 1-(1-0.3)*1
+	// lands on 0.30000000000000004 in binary floating point, and a floor that
+	// does not compare equal to the constant that declared it is a needless
+	// trap for anything that tests or displays it.
+	if severity <= 0 {
+		return 1
+	}
+	if severity >= 1 {
+		return floor
+	}
+	return 1 - (1-floor)*severity
 }
 
 // syncSignal reports whether the data ever arrived, and cleanly.
@@ -44,11 +61,11 @@ func rateSignal(name, label, detail, dataset string, rate float64,
 // visible before a reader gets as far as the column statistics — an empty
 // table profiles beautifully.
 func syncSignal(b bookRecord, dataset string) Signal {
-	s := Signal{Name: SignalSync, Dataset: dataset, Weight: weightSync}
+	s := Signal{Name: SignalSync, Dataset: dataset, Floor: FloorFatal}
 
 	switch {
 	case !b.found || (b.lastStarted == nil && b.okAt == nil):
-		s.Level, s.Score, s.Cap = Fail, 0, CapFailedSync
+		s.Level, s.Score = Fail, 0
 		s.Label = "never synced — this table has no sync record"
 		s.Detail = "The rows below, if any, did not come from a csq sync this database can account for."
 		return s
@@ -57,13 +74,13 @@ func syncSignal(b bookRecord, dataset string) Signal {
 		// A run that started and never recorded an end. Either it is in flight
 		// or it was killed; from here those look the same, and both mean the
 		// table may hold a partial load.
-		s.Level, s.Score, s.Cap = Fail, 0.2, CapFailedSync
+		s.Level, s.Score = Fail, 0.2
 		s.Label = "a sync was interrupted and never completed"
 		s.Detail = "The table may hold a partial load. Re-run the sync before quoting anything from it."
 		return s
 
 	case b.lastStatus != "ok":
-		s.Level, s.Score, s.Cap = Fail, 0, CapFailedSync
+		s.Level, s.Score = Fail, 0
 		s.Label = "the last sync failed"
 		s.Detail = strings.TrimSpace(b.lastError)
 		if s.Detail == "" {
@@ -96,7 +113,7 @@ func completenessSignal(held, expected int64, b bookRecord, dataset string) Sign
 	if expected <= 0 && b.catalogRows != nil {
 		expected = *b.catalogRows
 	}
-	s := Signal{Name: SignalCompleteness, Dataset: dataset, Weight: weightCompleteness}
+	s := Signal{Name: SignalCompleteness, Dataset: dataset, Floor: FloorFatal}
 
 	if expected <= 0 {
 		s.Level = Unknown
@@ -107,7 +124,7 @@ func completenessSignal(held, expected int64, b bookRecord, dataset string) Sign
 	if held == 0 {
 		// No rows is not "very incomplete", it is nothing at all: there is no
 		// data behind the answer, exactly as when the sync never ran.
-		s.Level, s.Score, s.Cap = Fail, 0, CapFailedSync
+		s.Level, s.Score = Fail, 0
 		s.Label = fmt.Sprintf("no rows held, against %s expected", commas(expected))
 		return s
 	}
@@ -128,7 +145,9 @@ func completenessSignal(held, expected int64, b bookRecord, dataset string) Sign
 		s.Detail = fmt.Sprintf("%s rows short of the %s reference count.",
 			commas(expected-held), commas(expected))
 	default:
-		s.Level, s.Score, s.Cap = Fail, ratio, CapIncomplete
+		// Retention is the ratio itself: a copy holding 54% of the records
+		// supports 54% of a count, and the index should say exactly that.
+		s.Level, s.Score = Fail, ratio
 		s.Label = fmt.Sprintf("only %s of expected rows present", pct(ratio))
 		s.Detail = fmt.Sprintf("%s rows short of the %s reference count — treat this copy as truncated.",
 			commas(expected-held), commas(expected))
@@ -151,7 +170,7 @@ func min1(f float64) float64 {
 // not land. It is the signature a killed run leaves behind, and it is invisible
 // to a completeness check whenever the reference count is also unavailable.
 func rowIntegritySignal(held int64, b bookRecord, dataset string) Signal {
-	s := Signal{Name: SignalRowIntegrity, Dataset: dataset, Weight: weightRowIntegrity}
+	s := Signal{Name: SignalRowIntegrity, Dataset: dataset, Floor: FloorRows}
 	if b.okRows == nil {
 		s.Level = Unknown
 		s.Label = "no successful sync to check the row count against"
@@ -173,7 +192,7 @@ func rowIntegritySignal(held int64, b bookRecord, dataset string) Signal {
 	return rateSignal(SignalRowIntegrity,
 		fmt.Sprintf("%s rows held, but the last sync wrote %s", commas(held), commas(written)),
 		"Rows are missing relative to what was written. A sync may have been interrupted partway through applying its results.",
-		dataset, rate, 0.001, 0.05, 0.5, weightRowIntegrity)
+		dataset, rate, 0.001, 0.05, 0.5, FloorRows)
 }
 
 // freshnessSignal reports how long ago the portal last changed the data.
@@ -184,7 +203,7 @@ func rowIntegritySignal(held int64, b bookRecord, dataset string) Signal {
 // worth catching — a fresh sync of frozen data reads as current to everyone
 // who does not check.
 func freshnessSignal(b bookRecord, dataset string, now time.Time) Signal {
-	s := Signal{Name: SignalFreshness, Dataset: dataset, Weight: weightFreshness}
+	s := Signal{Name: SignalFreshness, Dataset: dataset, Floor: FloorFreshness}
 	if b.upstreamUpdated == nil {
 		s.Level = Unknown
 		s.Label = "the portal does not report when this data last changed"
@@ -196,7 +215,7 @@ func freshnessSignal(b bookRecord, dataset string, now time.Time) Signal {
 	if days < 0 {
 		days = 0
 	}
-	s.Score = freshnessScore(days)
+	s.Score = retain(FloorFreshness, stalenessOf(days))
 	switch {
 	case days <= 90:
 		s.Level = Pass
@@ -212,22 +231,25 @@ func freshnessSignal(b bookRecord, dataset string, now time.Time) Signal {
 	return s
 }
 
-// freshnessScore decays with age across a fixed piecewise curve. A single
-// exponential would either punish a quarterly dataset or excuse a dead one;
-// the breakpoints are where a civic dataset's publication cadence usually
-// changes meaning.
-func freshnessScore(days int) float64 {
+// stalenessOf maps age to severity in [0,1] across a fixed piecewise curve.
+//
+// A single exponential would either punish a quarterly dataset or excuse a dead
+// one; the breakpoints are where a civic dataset's publication cadence usually
+// changes meaning. Severity feeds the transfer function, so at FloorFreshness
+// the very stalest data still retains half its reliability — old data is
+// degraded, not worthless.
+func stalenessOf(days int) float64 {
 	switch {
 	case days <= 30:
-		return 1
+		return 0
 	case days <= 90:
-		return lerp(float64(days), 30, 90, 1, 0.85)
+		return lerp(float64(days), 30, 90, 0, 0.15)
 	case days <= 365:
-		return lerp(float64(days), 90, 365, 0.85, 0.55)
+		return lerp(float64(days), 90, 365, 0.15, 0.45)
 	case days <= 1095:
-		return lerp(float64(days), 365, 1095, 0.55, 0.25)
+		return lerp(float64(days), 365, 1095, 0.45, 0.75)
 	default:
-		return 0.15
+		return 1
 	}
 }
 
@@ -242,7 +264,7 @@ func lerp(x, x0, x1, y0, y1 float64) float64 {
 // it — a provable gap between the local copy and the source, distinct from the
 // data simply being old.
 func lagSignal(b bookRecord, dataset string) Signal {
-	s := Signal{Name: SignalLag, Dataset: dataset, Weight: weightLag}
+	s := Signal{Name: SignalLag, Dataset: dataset, Floor: FloorLag}
 	if b.upstreamUpdated == nil || b.okAt == nil {
 		s.Level = Unknown
 		s.Label = "cannot tell whether this copy is behind the portal"
@@ -258,13 +280,16 @@ func lagSignal(b bookRecord, dataset string) Signal {
 	s.Label = fmt.Sprintf("portal has changed this data since the last sync (%s behind)",
 		plural(behind, "day"))
 	s.Detail = "Re-sync to pick up records published since then; rows added upstream are missing here."
+	// Severity rises with how far behind the copy is, saturating at a
+	// quarter's worth of missed publishing.
+	s.Score = retain(FloorLag, float64(behind)/90)
 	switch {
 	case behind <= 7:
-		s.Level, s.Score = Warn, 0.85
+		s.Level = Warn
 	case behind <= 90:
-		s.Level, s.Score = Warn, 0.6
+		s.Level = Warn
 	default:
-		s.Level, s.Score = Fail, 0.3
+		s.Level = Fail
 	}
 	return s
 }
@@ -278,13 +303,13 @@ func lagSignal(b bookRecord, dataset string) Signal {
 func nullSignal(p tableProfile, dataset string) Signal {
 	if p.rows == 0 {
 		return Signal{
-			Name: SignalNullDensity, Dataset: dataset, Weight: weightNulls,
-			Level: Fail, Score: 0, Cap: CapFailedSync, Label: "the table is empty",
+			Name: SignalNullDensity, Dataset: dataset, Floor: FloorFatal,
+			Level: Fail, Score: 0, Label: "the table is empty",
 		}
 	}
 	if len(p.cols) == 0 {
 		return Signal{
-			Name: SignalNullDensity, Dataset: dataset, Weight: weightNulls,
+			Name: SignalNullDensity, Dataset: dataset, Floor: FloorNulls,
 			Level: Unknown, Label: "no columns to profile for this query",
 		}
 	}
@@ -311,7 +336,7 @@ func nullSignal(p tableProfile, dataset string) Signal {
 
 	if worst.rate < 0.01 {
 		return Signal{
-			Name: SignalNullDensity, Dataset: dataset, Weight: weightNulls,
+			Name: SignalNullDensity, Dataset: dataset, Floor: FloorNulls,
 			Level: Pass, Score: 1,
 			Label: fmt.Sprintf("all %d columns this query reads are populated", len(p.cols)),
 		}
@@ -330,7 +355,7 @@ func nullSignal(p tableProfile, dataset string) Signal {
 	}
 	return rateSignal(SignalNullDensity,
 		fmt.Sprintf("%s of records lack %s", pct(worst.rate), worst.name),
-		detail, dataset, worst.rate, 0.01, 0.10, 0.5, weightNulls)
+		detail, dataset, worst.rate, 0.01, 0.10, 0.5, FloorNulls)
 }
 
 // dateSignal reports timestamps that cannot be real.
@@ -363,7 +388,7 @@ func dateSignal(p tableProfile, dataset string) (Signal, bool) {
 
 	if total == 0 {
 		return Signal{
-			Name: SignalDateRange, Dataset: dataset, Weight: weightDates,
+			Name: SignalDateRange, Dataset: dataset, Floor: FloorDates,
 			Level: Pass, Score: 1,
 			Label: fmt.Sprintf("dates within a possible range across %s",
 				plural(cols, "date column")),
@@ -374,7 +399,7 @@ func dateSignal(p tableProfile, dataset string) (Signal, bool) {
 	return rateSignal(SignalDateRange,
 		fmt.Sprintf("%s impossible dates in %s", commas(total), worstName),
 		"Values before 1677 or in the future. Bound the time range explicitly rather than trusting MIN and MAX.",
-		dataset, rate, 0.0001, 0.005, 0.05, weightDates), true
+		dataset, rate, 0.0001, 0.005, 0.05, FloorDates), true
 }
 
 // keySignal reports whether the identifiers a query joins or groups on are
@@ -407,7 +432,7 @@ func keySignal(p tableProfile, dataset string) (Signal, bool) {
 
 	if worstRate < 0.001 {
 		return Signal{
-			Name: SignalKeyIntegrity, Dataset: dataset, Weight: weightKeys,
+			Name: SignalKeyIntegrity, Dataset: dataset, Floor: FloorKeys,
 			Level: Pass, Score: 1,
 			Label:  fmt.Sprintf("%s consistent", plural(keys, "identifier")),
 			Detail: cardinality,
@@ -416,7 +441,7 @@ func keySignal(p tableProfile, dataset string) (Signal, bool) {
 	return rateSignal(SignalKeyIntegrity,
 		fmt.Sprintf("%s of records have no %s", pct(worstRate), worstName),
 		"Rows with a null identifier drop out of any join or grouping on it, without being reported as excluded.",
-		dataset, worstRate, 0.001, 0.05, 0.3, weightKeys), true
+		dataset, worstRate, 0.001, 0.05, 0.3, FloorKeys), true
 }
 
 // Concentration adds the advisory signal for a dominant row in a result.
@@ -446,7 +471,7 @@ func (r *Report) Concentration(labelCol string, topLabel string, topShare float6
 		what = topLabel
 	}
 	sig := Signal{
-		Name: SignalConcentration, Level: level, Weight: 0,
+		Name: SignalConcentration, Level: level, Floor: FloorAdvisory, Score: 1,
 		Label: fmt.Sprintf("%s accounts for %s of the total shown", what, pct(topShare)),
 		Detail: fmt.Sprintf("Measured across the %d rows returned, not the whole dataset. "+
 			"Concentration is routine in specialised procurement and is a question, not a finding.", rowsShown),

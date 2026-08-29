@@ -71,8 +71,16 @@ func RenderText(w io.Writer, r *Report, opts RenderOptions) {
 		return
 	}
 
-	fmt.Fprintf(w, "%sConfidence: %d%% (%s) — data fitness, not accuracy of the finding\n\n",
+	fmt.Fprintf(w, "%sConfidence: %d%% (%s) — data fitness, not accuracy of the finding\n",
 		p, r.Score, r.Band)
+	// Coverage is printed only when something could not be checked. At full
+	// coverage the line adds nothing; below it, the score is a verdict on less
+	// than the whole catalogue and must not be read as if it were not.
+	if r.Coverage < 100 {
+		fmt.Fprintf(w, "%s%d%% of checks could be run — the score covers only those.\n",
+			p, r.Coverage)
+	}
+	fmt.Fprintln(w)
 
 	multi := len(r.Datasets) > 1
 	emit := func(sigs []Signal) {
@@ -133,15 +141,18 @@ func (r *Report) Summary() string {
 	if r == nil || !r.Assessed {
 		return "confidence: not assessed"
 	}
-	n := len(r.Problems())
-	switch n {
+	out := fmt.Sprintf("confidence %d%% (%s)", r.Score, r.Band)
+	switch n := len(r.Problems()); n {
 	case 0:
-		return fmt.Sprintf("confidence %d%% (%s)", r.Score, r.Band)
 	case 1:
-		return fmt.Sprintf("confidence %d%% (%s), 1 caution", r.Score, r.Band)
+		out += ", 1 caution"
 	default:
-		return fmt.Sprintf("confidence %d%% (%s), %d cautions", r.Score, r.Band, n)
+		out += fmt.Sprintf(", %d cautions", n)
 	}
+	if r.Coverage < 100 {
+		out += fmt.Sprintf(", %d%% coverage", r.Coverage)
+	}
+	return out
 }
 
 // wrapText breaks s into lines of at most width characters on word boundaries.
