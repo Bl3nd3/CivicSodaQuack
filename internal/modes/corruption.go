@@ -49,8 +49,10 @@ var corruptionMode = &Mode{
 
 	Queries: []Query{
 		{
-			Name: "top-vendors",
-			Desc: "Vendors by total contract value awarded. The starting picture.",
+			Name:    "top-vendors",
+			Desc:    "Vendors by total contract value awarded. The starting picture.",
+			Entity:  "vendor_name",
+			Measure: "total_awarded",
 			SQL: `
 SELECT vendor_name,
        COUNT(*)                     AS contracts,
@@ -87,8 +89,10 @@ ORDER BY pct_of_department DESC, vendor_amount DESC
 LIMIT 40`,
 		},
 		{
-			Name: "procurement-type",
-			Desc: "Award value split by procurement type — how much spend bypasses open competition.",
+			Name:    "procurement-type",
+			Desc:    "Award value split by procurement type — how much spend bypasses open competition.",
+			Entity:  "procurement_type",
+			Measure: "total_awarded",
 			SQL: `
 SELECT COALESCE(procurement_type, '(unspecified)') AS procurement_type,
        COUNT(*)                                    AS contracts,
@@ -101,8 +105,10 @@ GROUP BY procurement_type
 ORDER BY total_awarded DESC`,
 		},
 		{
-			Name: "lobbyist-compensation",
-			Desc: "Highest-paying lobbying relationships, client to lobbyist.",
+			Name:    "lobbyist-compensation",
+			Desc:    "Highest-paying lobbying relationships, client to lobbyist.",
+			Entity:  "client_name",
+			Measure: "total_compensation",
 			SQL: `
 SELECT client_name,
        COUNT(*)                           AS filings,
@@ -116,8 +122,10 @@ ORDER BY total_compensation DESC
 LIMIT 30`,
 		},
 		{
-			Name: "contribution-recipients",
-			Desc: "Who receives money from registered lobbyists, ranked by total.",
+			Name:    "contribution-recipients",
+			Desc:    "Who receives money from registered lobbyists, ranked by total.",
+			Entity:  "recipient",
+			Measure: "total_amount",
 			SQL: `
 SELECT recipient,
        COUNT(*)                    AS contributions,

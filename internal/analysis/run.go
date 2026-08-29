@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomantra/CivicSodaQuack/internal/confidence"
 	"github.com/neomantra/CivicSodaQuack/internal/duckdb"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
@@ -50,6 +51,13 @@ type Result struct {
 	// Truncated reports that the row cap was hit, so the table is a prefix.
 	Truncated bool   `json:"truncated"`
 	Elapsed   string `json:"elapsed"`
+
+	// Confidence scores how far the data behind these rows can be trusted, and
+	// carries the signals that produced the score. It is a field on the result
+	// for the same reason Caveats and Excluded are: a consumer that can render
+	// the table without it would let a number from a broken or year-stale
+	// dataset look exactly like one from a clean sync.
+	Confidence *confidence.Report `json:"confidence,omitempty"`
 }
 
 // PlanQuery expands one query for the attached portals.
@@ -176,6 +184,11 @@ func (s *Session) Run(ctx context.Context, modeName, queryName string, limit int
 	if res.Excluded == nil {
 		res.Excluded = []Exclusion{}
 	}
+
+	// Profiling runs after the answer, never before it: a slow or failing
+	// assessment must not be able to withhold rows the query already produced.
+	res.Confidence = s.confidenceFor(ctx, m, *q)
+	confidence.AddConcentration(res.Confidence, q.Entity, q.Measure, res.Columns, res.Rows)
 	return res, nil
 }
 
