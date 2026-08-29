@@ -12,16 +12,20 @@
 //	U  rows held in which every column the query reads carries usable
 //	   information — not null, and for a timestamp, a date that could be real
 //
-// The dataset's retention is the fraction of the intended evidence that
-// survives, and the query's reliability is the product across its datasets:
+// The dataset's retention is the share of the intended evidence that survives,
+// and the query's reliability is the product across its datasets:
 //
-//	r = U / E                R = ∏ r
+//	completeness = min(1, H/E)     did the rows arrive
+//	usability    = U/H             do they carry what the query reads
 //
-// which factors exactly into the two stages a reader can act on separately:
+//	r = completeness × usability             R = ∏ r
 //
-//	U/E  =  H/E   ×   U/H
-//	        ────      ────
-//	   completeness   usability     (did it arrive)  (is it populated)
+// which is U/E whenever the local copy is no larger than the reference count.
+// It parts company with U/E only when a dataset has grown since it was mapped:
+// completeness saturates at 1 rather than exceeding it, so surplus rows cannot
+// pay for a defect elsewhere in the product, and the usable share is then
+// measured against what is actually held rather than against a stale
+// denominator.
 //
 // # Why this is the whole model
 //
@@ -191,10 +195,11 @@ type DatasetReport struct {
 	Held     int64 `json:"held"`     // H
 	Usable   int64 `json:"usable"`   // U
 
-	// The factorisation, for reporting. Retention is the product of the two.
-	Completeness float64 `json:"completeness"` // H/E
+	// The factorisation, for reporting. Retention is the product of the two,
+	// which equals U/E unless Completeness saturated (see the package doc).
+	Completeness float64 `json:"completeness"` // min(1, H/E)
 	Usability    float64 `json:"usability"`    // U/H
-	Retention    float64 `json:"retention"`    // U/E
+	Retention    float64 `json:"retention"`    // completeness × usability
 
 	// Rows is Held under the name interfaces already display it by.
 	Rows int64 `json:"rows"`
