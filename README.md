@@ -213,11 +213,11 @@ That is `U/E` whenever the local copy is no larger than the reference count. It 
 
 **Every term is a count divided by a count.** No weights, no severity coefficients, no saturation points, no thresholds anywhere in the arithmetic — nothing to tune, and therefore nothing to tune wrongly. Two scores are comparable because they are *the same measurement*, not because two tables of constants happened to agree.
 
-R is not an index. It has a plain reading: **the share of the records the query meant to consult that were actually there and usable.** Chicago's `procurement-type` scores 29% because 54,571 of 185,826 contracts carry every column it reads. NYC's `crime-rate` scores 54% because a count from it rests on 5,440,343 of the 10,071,507 records the portal holds. That sentence is the whole interpretation.
+R is not an index. It has a plain reading: **the share of the records the query meant to consult that were actually there and usable.** Chicago's `procurement-type` scores 30% because 55,200 of 185,826 contracts carry every column it reads. NYC's `crime-rate` scores 54% because a count from it rests on 5,440,343 of the 10,071,507 records the portal holds. That sentence is the whole interpretation.
 
 An earlier version scored eight checks using hand-chosen severity floors and saturation points — about twenty constants, each defensible alone and none of them derived. Six of the eight turned out to be the same measurement wearing different clothes: rows that do not survive. Stating it once removed every constant with it.
 
-**U is measured jointly, not combined.** A row survives when *every* column the query reads is usable — one SQL filter, not one rate per column multiplied together. Nulls in civic data cluster heavily, so assuming independence overstates the loss: on Chicago's contracts the true joint survival is 29.37%, while multiplying per-column rates gives 28.01%. One filter measures it directly.
+**U is measured jointly, not combined.** A row survives when *every* column the query reads is usable — one SQL filter, not one rate per column multiplied together. Nulls in civic data cluster heavily — the same contracts tend to be the thin ones — so assuming independence badly overstates the loss. Over the ten mapped columns of Chicago's contracts, 18.7% of rows carry all ten, while multiplying the per-column rates gives 8.9%: half the surviving evidence, discarded by an assumption. One filter measures it directly.
 
 **What is deliberately not scored.** Freshness and lag are reported beside R, never folded into it. Staleness removes no rows, so it has no reading as evidence loss — and how much 122-day-old data matters depends on the question (fine for a 2023 trend, useless for last week), which csq cannot know. Any coefficient there would be invented, so the age is stated as a fact and left to you. A failed sync is likewise a *diagnostic* explaining a shortfall completeness has already counted: scoring it too would bill the same missing rows twice, and would let a sync that failed at 90% read as having delivered nothing.
 
@@ -225,11 +225,11 @@ An earlier version scored eight checks using hand-chosen severity floors and sat
 
 **What R does not mean.** It measures the evidence, not the truth. A dataset that is complete, current and fully populated scores 100% while recording something other than what you think it records, or recording it with a bias no count can see. R is a ceiling on what can be known from this corpus, never a statement that a finding is correct.
 
-The only remaining constants are presentational: the pass/warn/fail cutoffs and the high/moderate/low bands, which choose an adjective for an exact number and take no part in computing it. The plausible-date bounds are definitional — DuckDB's own minimum timestamp, and two days' slack for clock skew.
+The only remaining constants are presentational: the pass/warn/fail cutoffs and the high/moderate/low/insufficient bands, which choose an adjective for an exact number and take no part in computing it. The plausible-date bounds are definitional — DuckDB's own minimum timestamp, and two days' slack for clock skew.
 
 Two further properties are structural rather than incidental:
 
-- **Only the datasets and columns the query actually reads are examined.** A mode binding three datasets, where the query opens one, is not dragged down by a stale dataset the answer never touches — nor flattered by a pristine one. Chicago's six corruption queries score 94, 94, 29, 100, 100 and 100 over the same three datasets.
+- **Only the datasets and columns the query actually reads are examined.** A mode binding three datasets, where the query opens one, is not dragged down by a stale dataset the answer never touches — nor flattered by a pristine one. Chicago's six corruption queries score 100, 94, 30, 100, 100 and 100 over the same three datasets — `top-vendors` reads no `department` column, so the 5.7% of contracts missing one cost it nothing.
 - **Concentration is computed only over the rows returned**, and says so. Inferring a global denominator from a top-N result produces a confidently wrong percentage.
 
 Profiling is one aggregate scan per dataset and is cached for five minutes, so a page running six analyses over the same corpus does not scan it eighteen times. Assessing NYC's 5.4M-row complaint table costs about 30ms. A query that cannot be assessed says "not assessed" rather than rendering a zero — they call for opposite responses from a reader.
