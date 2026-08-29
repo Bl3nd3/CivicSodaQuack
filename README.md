@@ -92,8 +92,16 @@ take the same advisory lock `csq sync` takes, and one runs at a time. Without
 read-only and prints the command instead. `csq web --db new.duckdb --config
 portal.yaml` creates the database if it does not exist yet.
 
-Every database is opened `READ_ONLY` for reading, so this composes with a
-running `csq mcp` or `csq sync` on the same file.
+Every database is opened `READ_ONLY`, so any number of *readers* can share one
+file — this page, a `csq mcp` server, a `csq query` in a terminal. A writer is
+not one of them: DuckDB locks the database file against other processes, so the
+page cannot attach a database that `csq sync` is writing elsewhere, and a sync
+started elsewhere cannot open one this page is holding. The lock is symmetric
+and the loser gets `Could not set lock on file`. Stop the other process first.
+
+The page's own **Download this data** button is unaffected, because that write
+happens inside this process, which already holds the file — the lock excludes
+other processes, not other handles.
 
 #### Share the results
 
@@ -155,7 +163,7 @@ For a mode with datasets, generate a config and sync it, then run the queries:
 
 Running the statements that produces against the Cook County corpus reports a `sentence_date` reaching the year **2921** and an `arrest_date` starting in **1915** — the kind of upstream defect that silently ruins a time series. Read generated SQL before running it, as you would any generated code.
 
-`modes run` attaches every portal `READ_ONLY`, so it composes with a running `csq mcp` or `csq sync` holding the same file instead of contending for the write lock.
+`modes run` attaches every portal `READ_ONLY`, so it can share a file with other readers — a `csq mcp` server, another `modes run`. It cannot read a database some other process is *writing*: DuckDB's file lock excludes a reader and a writer from each other in either order, so a running `csq sync` will fail this command with `Could not set lock on file`, and vice versa. Read-only attach avoids contending with other readers, not with a sync.
 
 Each mode carries interpretation caveats, printed by `modes show`, printed above `modes run` output, and embedded as comments in the YAML that `modes init` writes. They are a structural requirement — a test fails the build if a mode declares none. Contract concentration is frequently legitimate (specialised work may have one qualified bidder), and an unsustained complaint is not a false one; a tool reporting on procurement and policing should say so where the numbers are. Three scope limits worth stating up front:
 

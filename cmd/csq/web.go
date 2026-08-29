@@ -38,8 +38,10 @@ Options:
   --addr    Listen address (default 127.0.0.1:8080)
   --open    Open the page in your default browser
 
-Every database is opened READ_ONLY for reading, so this can run alongside a csq
-sync or an MCP server holding the same file. The browser chooses among the
+Every database is opened READ_ONLY, so this can run alongside other readers of
+the same file, such as an MCP server. It cannot open a database another process
+is writing: a csq sync running elsewhere on the same file will fail this command
+with "Could not set lock on file", and vice versa. The browser chooses among the
 analyses csq ships; it cannot send SQL of its own.
 
 With --config, the page can also download the datasets an analysis needs. Those
