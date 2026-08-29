@@ -422,6 +422,63 @@ function errorNode(err) {
     err.fix_command ? el('code', {}, err.fix_command) : null);
 }
 
+// Markers mirror the terminal renderer. Unknown gets one of its own rather
+// than being hidden: a reader who cannot see that a check was skipped assumes
+// it passed, which turns a gap in the evidence into a claim about the data.
+const CONF_MARK = { pass: '\u2713', warn: '\u26a0', fail: '\u2717', unknown: '\u00b7' };
+
+// confidenceNodes renders the data-fitness block for one result.
+//
+// The score is never rendered on its own. Every branch here that shows a
+// number also shows the signals behind it and the limits on reading it —
+// a bare percentage is precisely the artefact this is meant to prevent.
+function confidenceNodes(c) {
+  if (!c) return null;
+  if (!c.assessed) {
+    if (!c.datasets || !c.datasets.length) return null;
+    return el('div', { class: 'confidence' },
+      el('div', { class: 'conf-head' },
+        el('span', { class: 'conf-score unknown' }, 'Not assessed'),
+        el('span', { class: 'muted' },
+          'None of the datasets behind this answer could be profiled.')));
+  }
+
+  const band = c.band || 'insufficient';
+  const groups = [
+    c.signals.filter((s) => s.level === 'pass'),
+    c.signals.filter((s) => s.level === 'unknown'),
+    c.signals.filter((s) => s.level === 'warn' || s.level === 'fail'),
+  ];
+  const multi = (c.datasets || []).length > 1;
+
+  const line = (s) => el('li', { class: `conf-sig ${s.level}` },
+    el('span', { class: 'conf-mark', 'aria-hidden': 'true' }, CONF_MARK[s.level] || ''),
+    el('span', {},
+      el('span', {}, (multi && s.dataset ? `${s.dataset}: ` : '') + s.label),
+      s.detail ? el('span', { class: 'conf-detail' }, s.detail) : null));
+
+  return el('div', { class: 'confidence' },
+    el('div', { class: 'conf-head' },
+      el('span', { class: `conf-score ${band}` }, `${c.score}%`),
+      el('span', { class: 'conf-what' },
+        el('b', {}, `Confidence: ${band}`),
+        el('span', { class: 'muted' },
+          'Measures whether the data is fit to be queried \u2014 not whether the finding is true.')),
+      c.freshness_days != null
+        ? el('span', { class: 'conf-fresh' },
+            el('b', {}, c.freshness_days === 1 ? '1 day' : `${c.freshness_days} days`),
+            el('span', { class: 'muted' }, 'since the portal changed this data'))
+        : null),
+    el('div', { class: 'conf-bar' },
+      el('span', { class: `conf-fill ${band}`, style: `width:${Math.max(c.score, 2)}%` })),
+    el('ul', { class: 'conf-signals' }, groups.flat().map(line)),
+    c.limits && c.limits.length
+      ? el('details', { class: 'conf-limits' },
+          el('summary', {}, 'What this score does not mean'),
+          el('ul', {}, c.limits.map((l) => el('li', {}, l))))
+      : null);
+}
+
 function resultNodes(res, q) {
   const nodes = [el('h2', {}, q.name), el('p', { class: 'lede' }, q.desc)];
 
@@ -439,6 +496,12 @@ function resultNodes(res, q) {
       el('strong', {}, 'Not a comparison'),
       'Only one city qualified, so this is a single-city figure.'));
   }
+
+  // Confidence sits above the numbers for the same reason exclusions do. A
+  // score printed under a table is a footnote; printed over one it is a
+  // qualifier, and the whole point is that it be read before the figures are.
+  const conf = confidenceNodes(res.confidence);
+  if (conf) nodes.push(conf);
 
   if (!res.rows.length) {
     nodes.push(el('p', { class: 'spinner' }, 'This question returned no rows.'));

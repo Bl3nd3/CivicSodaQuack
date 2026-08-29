@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	_ "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/neomantra/CivicSodaQuack/internal/confidence"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
 
@@ -362,7 +364,8 @@ func runModeQueries(args []string) error {
 			}
 			fmt.Println()
 		}
-		if err := runAndPrint(host, expanded); err != nil {
+		cols, rows, err := runAndPrint(host, expanded)
+		if err != nil {
 			// A missing table means the mode's datasets were never synced. Say
 			// so usefully rather than surfacing a raw binder error.
 			fmt.Fprintf(os.Stderr, "  query %s failed: %v\n", q.Name, err)
@@ -375,23 +378,55 @@ func runModeQueries(args []string) error {
 			fmt.Fprintln(os.Stderr)
 			continue
 		}
+		printConfidence(host, m, q, binding, aliases, cols, rows, quiet)
 		fmt.Println()
 	}
 	return nil
 }
 
-// runAndPrint executes one query and renders the result as an aligned table.
-func runAndPrint(db *sql.DB, query string) error {
+// printConfidence renders the data-fitness block under a query's results.
+//
+// It runs after the table is on screen and never returns an error: an
+// assessment that cannot be produced must not be able to retract an answer the
+// user already has. A mode with no concepts reads csq's own bookkeeping and has
+// no synced dataset to profile, so it gets no block at all.
+func printConfidence(host *sql.DB, m *modes.Mode, q modes.Query, binding *modes.Binding,
+	aliases []string, cols []string, rows [][]any, quiet bool) {
+
+	if quiet || binding == nil || len(aliases) == 0 {
+		return
+	}
+	targets := confidence.TargetsFor(m, q, aliases[0], binding)
+	if len(targets) == 0 {
+		return
+	}
+	rep := confidence.Assess(context.Background(), host, targets, confidence.Options{})
+	if !rep.Assessed {
+		return
+	}
+	confidence.AddConcentration(rep, q.Entity, q.Measure, cols, rows)
+
+	fmt.Println()
+	confidence.RenderText(os.Stdout, rep, confidence.RenderOptions{
+		ShowDetail: true, Prefix: "  ",
+	})
+}
+
+// runAndPrint executes one query, renders it as an aligned table, and returns
+// the columns and rows it printed so a caller can read a concentration signal
+// off the same rows the user is looking at.
+func runAndPrint(db *sql.DB, query string) ([]string, [][]any, error) {
 	rows, err := db.Query(query)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
+	var out [][]any
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, strings.Join(cols, "\t"))
@@ -409,23 +444,24 @@ func runAndPrint(db *sql.DB, query string) error {
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return err
+			return nil, nil, err
 		}
 		cells := make([]string, len(cols))
 		for i, v := range vals {
 			cells[i] = renderCell(v)
 		}
 		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+		out = append(out, vals)
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := tw.Flush(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	fmt.Printf("(%d rows)\n", n)
-	return nil
+	return cols, out, nil
 }
 
 func renderCell(v any) string {

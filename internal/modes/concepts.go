@@ -423,3 +423,14 @@ func (m *Mode) ApproxRowsFor(b *Binding) int64 {
 	}
 	return n
 }
+
+// ConceptRefs returns the concept names a query reads via {{c:name}}, in the
+// order they first appear. Exported so callers outside this package — the
+// confidence assessor, notably — can tell which datasets a query actually
+// touches without re-parsing the SQL themselves.
+func ConceptRefs(sqlText string) []string { return conceptRefs(sqlText) }
+
+// QueryReadsColumn reports whether the SQL references col as a whole word.
+// Exported for the same reason as ConceptRefs: knowing which columns a query
+// reads is what lets a data-quality check profile those columns and no others.
+func QueryReadsColumn(sqlText, col string) bool { return queryUsesColumn(sqlText, col) }

@@ -165,6 +165,55 @@ Each mode carries interpretation caveats, printed by `modes show`, printed above
 
 Adding a mode means appending to the registry in `internal/modes/`, not touching the CLI.
 
+### Confidence scores
+
+Every mode query carries a **confidence score**: how far the data behind that particular answer can be trusted. It appears under `modes run`, above the table in the browser, in both export formats, and in the shareable report.
+
+```
+  Confidence: 60% (low) — data fitness, not accuracy of the finding
+
+  ✓ dataset successfully synced on 28 Aug 2026
+  ✓ 5,440,343 rows held, consistent with the last sync
+  ✓ all 2 columns this query reads are populated
+  ✓ dates within a possible range across 1 date column
+  ✓ local copy is current with the portal
+
+  ⚠ portal has not updated this data in 122 days
+  ✗ only 54% of expected rows present
+      4,631,164 rows short of the 10,071,507 reference count — treat this
+      copy as truncated.
+
+  Source freshness: 122 days
+```
+
+That is a real assessment of NYC's complaint data, and it is the case the feature exists for: the query returns entirely plausible per-capita crime rates computed over roughly half the dataset, and nothing else on the page would tell you.
+
+**It scores data fitness, not truth.** Whether the sync finished, whether the copy is complete and current, whether the columns *this query reads* are populated, whether the dates are possible. A city that under-reports a category will score 95. The score is therefore never rendered alone — the signals that produced it and the limits on reading it are fields on the same response, and no renderer has a path that emits one without the others.
+
+Eight signals are measured per dataset, each weighted by how fast it ruins an answer:
+
+| Signal | What it catches |
+| --- | --- |
+| `sync` | A sync that never ran, failed, or was interrupted and left a partial load |
+| `completeness` | Rows held against the reference count recorded when the dataset was mapped |
+| `row_integrity` | Rows missing relative to what the last successful sync says it wrote |
+| `freshness` | How long ago the *portal* last changed the data — not when csq last pulled it |
+| `local_lag` | The portal has published changes since your last sync |
+| `null_density` | The emptiest column the query reads, named and quantified |
+| `date_range` | Timestamps before 1677 or in the future, which silently wreck a time series |
+| `key_integrity` | Null identifiers, which drop out of a join without being reported as excluded |
+
+Four properties are structural rather than incidental:
+
+- **Only the datasets and columns the query actually reads are profiled.** A mode binding three datasets, where the query opens one, is not dragged down by a stale dataset the answer never touches — nor flattered by a pristine one.
+- **Unmeasurable is not the same as fine.** A signal that could not be evaluated is excluded from the weighted mean rather than scored as zero or one, and renders with its own marker. Otherwise a portal publishing less metadata would score differently for reasons unrelated to its data.
+- **Two failures cap the score outright.** A weighted mean is far too forgiving of a dataset that never arrived — seven clean column checks on an empty table would average out to "moderate".
+- **Concentration is advisory and never scored.** "One vendor accounts for 61% of the total shown" is a fact about procurement, not a defect in the data; it is reported because a reader needs it, and computed only over the rows returned, because inferring a global denominator from a top-N result produces a confidently wrong percentage.
+
+Profiling is one aggregate scan per dataset and is cached for five minutes, so a page running six analyses over the same corpus does not scan it eighteen times. Assessing NYC's 5.4M-row complaint table costs about 30ms. A query that cannot be assessed says "not assessed" rather than rendering a zero — they call for opposite responses from a reader.
+
+`csq modes run` prints the block automatically; `--quiet` suppresses it along with the caveats.
+
 ### Serve via MCP
 
 ```bash
@@ -312,6 +361,7 @@ internal/mcpserver/   # MCP server: pools, ATTACH, tools, transports
 internal/snapshot/    # Snapshot publishing: tar+zst format, Pack producer, Fetch consumer
 internal/modes/       # Curated analysis profiles: datasets, queries, caveats
 internal/analysis/    # Headless mode execution: planning, exclusions, readiness
+internal/confidence/  # Data-fitness scoring: dataset profiling, signals, caps
 internal/web/         # Browser UI: JSON API, embedded assets, HTML reports
 ```
 
