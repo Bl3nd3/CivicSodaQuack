@@ -170,72 +170,70 @@ Adding a mode means appending to the registry in `internal/modes/`, not touching
 Every mode query carries a **confidence score**: how far the data behind that particular answer can be trusted. It appears under `modes run`, above the table in the browser, in both export formats, and in the shareable report.
 
 ```
-  Confidence: 60% (low) — data fitness, not accuracy of the finding
+  Confidence: 54% (low) — the share of records this query reads that are
+  present and usable
 
   ✓ dataset successfully synced on 28 Aug 2026
-  ✓ 5,440,343 rows held, consistent with the last sync
+      The run recorded writing 5,440,343 rows.
   ✓ all 2 columns this query reads are populated
-  ✓ dates within a possible range across 1 date column
   ✓ local copy is current with the portal
 
   ⚠ portal has not updated this data in 122 days
-  ✗ only 54% of expected rows present
-      4,631,164 rows short of the 10,071,507 reference count — treat this
-      copy as truncated.
+  ✗ 54% of expected rows present
+      4,631,164 rows short of the 10,071,507 reference count.
 
   Source freshness: 122 days
 ```
 
-That is a real assessment of NYC's complaint data, and it is the case the feature exists for: the query returns entirely plausible per-capita crime rates computed over roughly half the dataset, and nothing else on the page would tell you.
+That is a real assessment of NYC's complaint data, and it is the case the feature exists for: the query returns entirely plausible per-capita crime rates computed over roughly half the dataset, and nothing else on the page would tell you. The 54% is not a rating — it is the fraction 5,440,343 / 10,071,507.
 
-**It scores data fitness, not truth.** Whether the sync finished, whether the copy is complete and current, whether the columns *this query reads* are populated, whether the dates are possible. A city that under-reports a category will score 95. The score is therefore never rendered alone — the checks that produced it and the limits on reading it are fields on the same response, and no renderer has a path that emits one without the others.
+**It measures the evidence, not the truth.** The score is the share of records this query reads that are present and usable. A city that under-reports a category still scores 100%. The number is therefore never rendered alone — the counts that produced it and the limits on reading it are fields on the same response, and no renderer has a path that emits one without the others.
 
 #### The formula
 
-Reliability is a **product, not an average**:
+For each dataset a query reads, three counts:
 
 ```
-R = ∏ rᵢ        over every check that was actually performed
+E   rows the portal holds        (the reference count)
+H   rows held locally
+U   rows held in which every column the query reads carries usable
+    information — not null, and for a timestamp, a date that could be real
 ```
 
-Each check returns a *retention factor* `rᵢ ∈ [floorᵢ, 1]` — the share of the answer's trustworthiness that survives it. A check that finds nothing wrong returns 1 and leaves `R` untouched. Each maps its measurement through one shared, monotone transfer function, where `x` is the fraction of rows at fault:
+The dataset's retention is the share of the intended evidence that survives, and the query's score is the product across its datasets:
 
 ```
-r = 1 − (1 − floor) × min(1, x / zeroAt)
+r = U / E                R = ∏ r
 ```
 
-`floor` is the check's severity, stated as *the most trust a single defect of that kind can destroy*. It is the model's only tuning table, and every entry is a sentence rather than a coefficient:
+which factors exactly into the two stages you can act on separately:
 
-| Check | Floor | What it catches |
-| --- | --- | --- |
-| `sync` | 0.0 | A sync that never ran, failed, or was interrupted — no data, no reliability |
-| `completeness` | 0.0 | Rows held against the reference count. Retention *is* the ratio: a copy holding 54% of the records supports 54% of a count |
-| `row_integrity` | 0.3 | Rows that arrived and then went missing relative to what the sync recorded writing |
-| `null_density` | 0.3 | The emptiest column the query reads, named and quantified |
-| `date_range` | 0.4 | Timestamps before 1677 or in the future, which silently wreck a time series |
-| `freshness` | 0.5 | How long ago the *portal* last changed the data — old data is degraded, never worthless |
-| `local_lag` | 0.6 | The portal has published changes since your last sync |
-| `key_integrity` | 0.7 | Null identifiers, which drop rows out of a join without being reported as excluded |
-| `concentration` | 1.0 | Advisory: can cost nothing, so it cannot move `R` |
+```
+U/E  =  H/E    ×   U/H
+        ────       ────
+   completeness   usability     (did it arrive)  (is it populated)
+```
 
-**Why a product.** A weighted mean was the obvious first choice and it was wrong here, in three ways a product fixes at once:
+**Every term is a count divided by a count.** No weights, no severity coefficients, no saturation points, no thresholds anywhere in the arithmetic — nothing to tune, and therefore nothing to tune wrongly. Two scores are comparable because they are *the same measurement*, not because two tables of constants happened to agree.
 
-- **It diluted.** Averaged, NYC's complaint data scored **90%** while holding 54% of its rows — six passing checks outvoted the one that mattered. Multiplied it scores **49%**, because a check finding half the data missing removes half the reliability no matter how many others pass.
-- **It needed caps, and caps mean cliffs.** Rescuing the mean meant clamping the score when a critical check failed, which put a **37-point discontinuity across a 0.2% change in completeness** (97% → 60%). `R` is continuous and monotone in every input: more of a defect always costs more, proportionally, never in a jump.
-- **It was not comparable with itself.** A mean's denominator changes with how many checks happened to be measurable, so two 80% scores could mean different things. A product has no denominator — **adding a check that passes leaves `R` exactly where it was**, so the score depends only on the defects found, never on how many ways they were looked for.
+R is not an index. It has a plain reading: **the share of the records the query meant to consult that were actually there and usable.** Chicago's `procurement-type` scores 29% because 54,571 of 185,826 contracts carry every column it reads. NYC's `crime-rate` scores 54% because a count from it rests on 5,440,343 of the 10,071,507 records the portal holds. That sentence is the whole interpretation.
 
-That last property is what makes two scores comparable, and it is enforced by a test. It also means every point of loss traces to a named defect: NYC's permit data scores 96%, and the missing 4 points are exactly its 2.7% of unparseable `issue_date` values.
+An earlier version scored eight checks using hand-chosen severity floors and saturation points — about twenty constants, each defensible alone and none of them derived. Six of the eight turned out to be the same measurement wearing different clothes: rows that do not survive. Stating it once removed every constant with it.
 
-**Uncertainty is reported, not averaged in.** A check that could not be run is excluded from the product — which makes it indistinguishable from one that passed. So the gap travels *beside* `R` rather than inside it, as **coverage**: the share of applicable checks actually performed. 95% at full coverage and 95% at half coverage are different claims, and no single number can hold both. Coverage is shown only when it is below 100%.
+**U is measured jointly, not combined.** A row survives when *every* column the query reads is usable — one SQL filter, not one rate per column multiplied together. Nulls in civic data cluster heavily, so assuming independence overstates the loss: on Chicago's contracts the true joint survival is 29.37%, while multiplying per-column rates gives 28.01%. One filter measures it directly.
 
-**`R` is an index, not a probability.** Nothing here is calibrated against known outcomes, so it does not estimate the chance an answer is wrong. What it guarantees is consistency: the same defects always produce the same number, and two scores built from this catalogue are comparable with each other.
+**What is deliberately not scored.** Freshness and lag are reported beside R, never folded into it. Staleness removes no rows, so it has no reading as evidence loss — and how much 122-day-old data matters depends on the question (fine for a 2023 trend, useless for last week), which csq cannot know. Any coefficient there would be invented, so the age is stated as a fact and left to you. A failed sync is likewise a *diagnostic* explaining a shortfall completeness has already counted: scoring it too would bill the same missing rows twice, and would let a sync that failed at 90% read as having delivered nothing.
 
-Two consequences worth stating: a fatal defect zeroes `R` with no cap needed to force it, and a floor bounds what any survivable fault can cost — the stalest data in the world still retains half its reliability, because old data is still data.
+**Uncertainty is reported, not averaged in.** A check that could not run is excluded from the product, which makes it indistinguishable from one that cost nothing. So the gap travels *beside* R as **coverage**: the share of scored checks actually performed. Shown only when below 100%.
+
+**What R does not mean.** It measures the evidence, not the truth. A dataset that is complete, current and fully populated scores 100% while recording something other than what you think it records, or recording it with a bias no count can see. R is a ceiling on what can be known from this corpus, never a statement that a finding is correct.
+
+The only remaining constants are presentational: the pass/warn/fail cutoffs and the high/moderate/low bands, which choose an adjective for an exact number and take no part in computing it. The plausible-date bounds are definitional — DuckDB's own minimum timestamp, and two days' slack for clock skew.
 
 Two further properties are structural rather than incidental:
 
-- **Only the datasets and columns the query actually reads are profiled.** A mode binding three datasets, where the query opens one, is not dragged down by a stale dataset the answer never touches — nor flattered by a pristine one.
-- **Concentration is advisory and never scored.** "One vendor accounts for 61% of the total shown" is a fact about procurement, not a defect in the data. It floors at 1, so it cannot move `R` without needing a special case in the arithmetic, and it is computed only over the rows returned — inferring a global denominator from a top-N result produces a confidently wrong percentage.
+- **Only the datasets and columns the query actually reads are examined.** A mode binding three datasets, where the query opens one, is not dragged down by a stale dataset the answer never touches — nor flattered by a pristine one. Chicago's six corruption queries score 94, 94, 29, 100, 100 and 100 over the same three datasets.
+- **Concentration is computed only over the rows returned**, and says so. Inferring a global denominator from a top-N result produces a confidently wrong percentage.
 
 Profiling is one aggregate scan per dataset and is cached for five minutes, so a page running six analyses over the same corpus does not scan it eighteen times. Assessing NYC's 5.4M-row complaint table costs about 30ms. A query that cannot be assessed says "not assessed" rather than rendering a zero — they call for opposite responses from a reader.
 

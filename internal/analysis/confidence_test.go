@@ -18,6 +18,12 @@ import (
 // contracts dataset, so the assessor runs against real DuckDB rather than a
 // stub. The SQL this package generates is most of its risk; a fake Queryer
 // would test the arithmetic and none of the queries.
+// expectedContracts is the reference row count the corruption binding records
+// for Chicago's contracts dataset. A fixture writing fewer rows is genuinely an
+// incomplete copy and now scores as one, so tests meaning to exercise
+// something other than completeness write exactly this many.
+const expectedContracts = 185699
+
 type fixture struct {
 	rows int // contract rows to write
 	// nullDepartments many of those rows get a NULL department.
@@ -146,7 +152,7 @@ func TestConfidence_HealthyDataset(t *testing.T) {
 	if s := signalNamed(t, rep, confidence.SignalSync); s.Level != confidence.Pass {
 		t.Errorf("sync = %v, want Pass", s.Level)
 	}
-	if s := signalNamed(t, rep, confidence.SignalNullDensity); s.Level != confidence.Pass {
+	if s := signalNamed(t, rep, confidence.SignalUsability); s.Level != confidence.Pass {
 		t.Errorf("null_density = %v (%s), want Pass", s.Level, s.Label)
 	}
 }
@@ -169,7 +175,7 @@ func TestConfidence_NullDensityIsMeasuredThroughRealSQL(t *testing.T) {
 	path := newCorruptionDB(t, fixture{rows: 1000, nullDepartments: 32})
 	rep := assess(t, path, "department-concentration")
 
-	s := signalNamed(t, rep, confidence.SignalNullDensity)
+	s := signalNamed(t, rep, confidence.SignalUsability)
 	if s.Level != confidence.Warn {
 		t.Errorf("null_density = %v, want Warn", s.Level)
 	}
@@ -178,34 +184,41 @@ func TestConfidence_NullDensityIsMeasuredThroughRealSQL(t *testing.T) {
 	}
 }
 
-func TestConfidence_ImpossibleDatesAreCaught(t *testing.T) {
-	// start_date is an optional concept column, so a query has to mention it
-	// for it to be profiled. procurement-type does not, department-
-	// concentration does not either — use the query that reads it.
-	path := newCorruptionDB(t, fixture{rows: 1000, futureDates: 40})
+// Impossible dates in a column the query never reads must cost it nothing:
+// examining a column the answer cannot reach would depress a score for a
+// defect it is not exposed to.
+func TestConfidence_UnreadColumnsAreNotExamined(t *testing.T) {
+	// A fifth of start_date is set to the year 3999, but top-vendors reads
+	// vendor_name, department and award_amount — never start_date.
+	path := newCorruptionDB(t, fixture{rows: expectedContracts, futureDates: 37000})
 	rep := assess(t, path, "top-vendors")
 
-	// top-vendors does not read start_date, so no date signal should appear:
-	// profiling a column the query ignores would depress a score for an answer
-	// that cannot reach it.
-	for _, s := range rep.Signals {
-		if s.Name == confidence.SignalDateRange {
-			t.Errorf("date_range signal on a query that reads no date column: %q", s.Label)
-		}
+	s := signalNamed(t, rep, confidence.SignalUsability)
+	if s.Level != confidence.Pass {
+		t.Errorf("usability = %v (%s), want Pass — start_date is not read here",
+			s.Level, s.Label)
+	}
+	if rep.Score != 100 {
+		t.Errorf("Score = %d, want 100", rep.Score)
 	}
 }
 
-func TestConfidence_FailedSyncZeroesTheScore(t *testing.T) {
-	path := newCorruptionDB(t, fixture{rows: 1000, syncStatus: "error"})
+func TestConfidence_FailedSyncIsReportedNotScored(t *testing.T) {
+	path := newCorruptionDB(t, fixture{rows: expectedContracts, syncStatus: "error"})
 	rep := assess(t, path, "top-vendors")
 
 	if s := signalNamed(t, rep, confidence.SignalSync); s.Level != confidence.Fail {
 		t.Errorf("sync = %v, want Fail", s.Level)
 	}
-	// A failed sync floors at zero retention, so it takes the whole index with
-	// it — no cap needed to force the result.
-	if rep.Score != 0 {
-		t.Errorf("Score = %d, want 0", rep.Score)
+	// The sync failure is reported, never scored: the rows it did deliver are
+	// counted by completeness, and charging the failure again would bill the
+	// same missing rows twice.
+	if s := signalNamed(t, rep, confidence.SignalSync); !s.Advisory() {
+		t.Error("a failed sync must be diagnostic, not scored")
+	}
+	if rep.Score != 100 {
+		t.Errorf("Score = %d, want 100 — every expected row is present despite the failure",
+			rep.Score)
 	}
 }
 
@@ -221,15 +234,20 @@ func TestConfidence_InterruptedSyncIsCaught(t *testing.T) {
 	}
 }
 
-// Rows present against rows the sync says it wrote: the fault a completeness
-// check misses whenever no reference count is available.
-func TestConfidence_RowShortfallAgainstTheSyncIsCaught(t *testing.T) {
-	path := newCorruptionDB(t, fixture{rows: 500, rowsWritten: 1000})
+// A shortfall against the portal's reference count is what completeness
+// measures, and it is scored as the plain ratio.
+func TestConfidence_RowShortfallIsScoredAsTheRatio(t *testing.T) {
+	// The binding records 185,699 contracts upstream; hold a tenth of them.
+	path := newCorruptionDB(t, fixture{rows: 18570})
 	rep := assess(t, path, "top-vendors")
 
-	s := signalNamed(t, rep, confidence.SignalRowIntegrity)
+	s := signalNamed(t, rep, confidence.SignalCompleteness)
 	if s.Level != confidence.Fail {
-		t.Errorf("row_integrity = %v (%s), want Fail", s.Level, s.Label)
+		t.Errorf("completeness = %v (%s), want Fail", s.Level, s.Label)
+	}
+	if rep.Score != 10 {
+		t.Errorf("Score = %d, want 10 — a tenth of the rows is a tenth of the evidence",
+			rep.Score)
 	}
 }
 
@@ -243,8 +261,13 @@ func TestConfidence_StaleUpstreamDespiteFreshSync(t *testing.T) {
 	rep := assess(t, path, "top-vendors")
 
 	s := signalNamed(t, rep, confidence.SignalFreshness)
-	if s.Level != confidence.Fail {
-		t.Errorf("freshness = %v (%s), want Fail", s.Level, s.Label)
+	if s.Level != confidence.Warn {
+		t.Errorf("freshness = %v (%s), want Warn", s.Level, s.Label)
+	}
+	// Reported beside the score, never multiplied into it: staleness removes
+	// no rows, and how much it matters depends on the question being asked.
+	if !s.Advisory() {
+		t.Error("freshness must be diagnostic")
 	}
 	if rep.FreshnessDays == nil || *rep.FreshnessDays < 1000 {
 		t.Errorf("FreshnessDays = %v, want ~1095", rep.FreshnessDays)
@@ -262,8 +285,13 @@ func TestConfidence_CopyBehindThePortalIsCaught(t *testing.T) {
 	rep := assess(t, path, "top-vendors")
 
 	s := signalNamed(t, rep, confidence.SignalLag)
-	if s.Level != confidence.Fail {
-		t.Errorf("local_lag = %v (%s), want Fail", s.Level, s.Label)
+	if s.Level != confidence.Warn {
+		t.Errorf("local_lag = %v (%s), want Warn", s.Level, s.Label)
+	}
+	// Rows published since the last sync cannot be counted from here, so there
+	// is no measured loss to score — only a gap to report.
+	if !s.Advisory() {
+		t.Error("local_lag must be diagnostic")
 	}
 }
 
@@ -273,8 +301,8 @@ func TestConfidence_EmptyTableDoesNotScoreWell(t *testing.T) {
 	path := newCorruptionDB(t, fixture{rows: 0})
 	rep := assess(t, path, "top-vendors")
 
-	if rep.Score >= 50 {
-		t.Errorf("Score = %d on an empty table, want well under 50", rep.Score)
+	if rep.Score != 0 {
+		t.Errorf("Score = %d on an empty table, want 0", rep.Score)
 	}
 }
 

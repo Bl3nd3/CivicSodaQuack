@@ -10,20 +10,6 @@ import (
 	"time"
 )
 
-// Signal names. Stable slugs: interfaces group and filter on them, and the
-// score caps in finalize key off two of them.
-const (
-	SignalSync          = "sync"
-	SignalRowIntegrity  = "row_integrity"
-	SignalCompleteness  = "completeness"
-	SignalFreshness     = "freshness"
-	SignalLag           = "local_lag"
-	SignalDateRange     = "date_range"
-	SignalNullDensity   = "null_density"
-	SignalKeyIntegrity  = "key_integrity"
-	SignalConcentration = "concentration"
-)
-
 // Target is one dataset a query reads, described in the mode's own vocabulary.
 type Target struct {
 	// Portal is the alias of the attached database holding the table.
@@ -230,38 +216,51 @@ func timePtr(t sql.NullTime) *time.Time {
 func assessOne(ctx context.Context, q Queryer, t Target, book bookRecord, opts Options) DatasetReport {
 	d := DatasetReport{
 		Table: t.Table, DatasetID: t.DatasetID, Name: t.Name,
-		Portal: t.Portal, Concept: t.Concept, ExpectedRows: t.ExpectedRows,
+		Portal: t.Portal, Concept: t.Concept, Expected: t.ExpectedRows,
 		UpstreamUpdated: book.upstreamUpdated, LastSynced: book.okAt,
+	}
+	if d.Expected == 0 && book.catalogRows != nil {
+		d.Expected = *book.catalogRows
 	}
 	label := t.Table
 
-	// Sync history first: if the data never landed, everything measured on the
-	// table afterwards describes an empty or stale artefact.
+	// How the data got here, and whether anything went wrong. Diagnostic: it
+	// explains a shortfall that completeness has already counted.
 	d.Signals = append(d.Signals, syncSignal(book, label))
 
 	types, terr := describeView(ctx, q, t)
 	prof, perr := profile(ctx, q, t, types, opts.now())
 
-	switch {
-	case terr != nil || perr != nil:
-		d.Signals = append(d.Signals, Signal{
-			Name: SignalNullDensity, Level: Unknown, Floor: FloorNulls, Dataset: label,
-			Label:  fmt.Sprintf("could not profile %s", label),
-			Detail: firstErr(terr, perr),
-		})
-	default:
-		d.Rows = prof.rows
-		d.Signals = append(d.Signals, completenessSignal(prof.rows, t.ExpectedRows, book, label))
-		d.Signals = append(d.Signals, rowIntegritySignal(prof.rows, book, label))
-		d.Signals = append(d.Signals, nullSignal(prof, label))
-		if s, ok := dateSignal(prof, label); ok {
-			d.Signals = append(d.Signals, s)
+	if terr != nil || perr != nil {
+		// The table could not be read at all, so neither factor of U/E can be
+		// measured. Both are Unknown rather than zero: "we could not look" and
+		// "we looked and found nothing" call for opposite responses.
+		why := firstErr(terr, perr)
+		d.Signals = append(d.Signals,
+			Signal{Name: SignalCompleteness, Kind: Scored, Level: Unknown, Dataset: label,
+				Label: fmt.Sprintf("could not read %s", label), Detail: why},
+			Signal{Name: SignalUsability, Kind: Scored, Level: Unknown, Dataset: label,
+				Label: fmt.Sprintf("could not examine the columns of %s", label), Detail: why})
+	} else {
+		d.Held, d.Rows, d.Usable = prof.rows, prof.rows, prof.usable
+
+		completeness := completenessSignal(d.Held, t.ExpectedRows, book.catalogRows, label)
+		usability := usabilitySignal(prof, label)
+		d.Signals = append(d.Signals, completeness, usability)
+
+		// Record the factorisation so a reader can reconstruct r without
+		// re-deriving it from the signal list.
+		d.Completeness, d.Usability = 1, 1
+		if completeness.Level != Unknown {
+			d.Completeness = clamp01(completeness.Score)
 		}
-		if s, ok := keySignal(prof, label); ok {
-			d.Signals = append(d.Signals, s)
+		if usability.Level != Unknown {
+			d.Usability = clamp01(usability.Score)
 		}
+		d.Retention = d.Completeness * d.Usability
 	}
 
+	// Reported beside R, never folded into it. See the package doc.
 	d.Signals = append(d.Signals, freshnessSignal(book, label, opts.now()))
 	d.Signals = append(d.Signals, lagSignal(book, label))
 	return d
@@ -329,53 +328,63 @@ type role int
 const (
 	roleValue role = iota
 	roleDate
-	roleKey
 )
 
-func roleFor(name, dtype string) role {
-	switch {
-	case strings.HasPrefix(dtype, "DATE"), strings.HasPrefix(dtype, "TIMESTAMP"):
+// roleFor classifies a canonical column. Only dates need distinguishing: they
+// carry a plausibility condition beyond being non-null. A null identifier is
+// just a null column — it drops the row from a join exactly as any other
+// missing value drops it from a grouping, and needs no separate rule.
+func roleFor(_, dtype string) role {
+	if strings.HasPrefix(dtype, "DATE") || strings.HasPrefix(dtype, "TIMESTAMP") {
 		return roleDate
-	case name == "socrata_id" || strings.HasSuffix(name, "_id"):
-		return roleKey
 	}
 	return roleValue
 }
 
-// colProfile is what one aggregate scan learned about one column.
+// colProfile is what one aggregate scan learned about one column. The counts
+// are diagnostic: they name which column is at fault. The score comes from the
+// joint count in tableProfile.usable.
 type colProfile struct {
-	name     string
-	role     role
-	nulls    int64
-	past     int64 // values before minPlausibleYear
-	future   int64 // values beyond today
-	distinct int64
+	name   string
+	role   role
+	nulls  int64
+	past   int64 // values before minPlausibleDate
+	future int64 // values beyond today
 }
 
 // tableProfile is the result of the single scan over one dataset.
 type tableProfile struct {
 	rows int64
-	cols []colProfile
+	// usable is U: rows in which every column the query reads carries usable
+	// information. Measured as one joint condition rather than combined from
+	// per-column rates, because nulls in civic data cluster heavily and
+	// assuming independence would overstate the loss.
+	usable int64
+	cols   []colProfile
 }
 
-// minPlausibleDate is the floor for a civic date. Nothing in an open-data
-// portal legitimately predates it, and sentinel nulls encoded as year 0001 or
-// 1900-01-01 are common enough to be worth catching by name.
+// minPlausibleDate is the floor for a civic date. It is DuckDB's own timestamp
+// minimum rather than a chosen cutoff: below it a value cannot be represented,
+// let alone be real. Sentinel nulls encoded as year 0001 land here.
 const minPlausibleDate = "1677-09-22"
 
 // futureSlack is how far past now a timestamp may sit before it is impossible.
-// Permits are issued with future effective dates and portals disagree about
-// time zones, so a day or two of slack avoids flagging normal records.
+// Permits carry future effective dates and portals disagree about time zones,
+// so a couple of days of slack avoids flagging ordinary records.
 const futureSlack = "2 DAY"
 
-// profile runs one aggregate scan per dataset, computing every column check at
-// once. One scan rather than one per column is what makes this affordable to
-// run on the path of an ordinary query.
+// profile runs one aggregate scan per dataset, computing the row count, the
+// joint usable count, and the per-column diagnosis together. One scan rather
+// than one per column is what makes this affordable on the path of an ordinary
+// query.
 func profile(ctx context.Context, q Queryer, t Target, types map[string]string, now time.Time) (tableProfile, error) {
 	var tp tableProfile
 
+	nowLit := now.UTC().Format("2006-01-02 15:04:05")
 	seen := map[string]bool{}
 	sel := []string{"COUNT(*)"}
+	var unusable []string // per-column reasons a row fails to survive
+
 	for _, c := range t.Columns {
 		lc := strings.ToLower(c)
 		if seen[lc] {
@@ -384,7 +393,7 @@ func profile(ctx context.Context, q Queryer, t Target, types map[string]string, 
 		dtype, known := types[lc]
 		if !known {
 			// The binding does not project this column, so the query cannot be
-			// reading it. Nothing to profile.
+			// reading it. Nothing to examine.
 			continue
 		}
 		seen[lc] = true
@@ -392,17 +401,26 @@ func profile(ctx context.Context, q Queryer, t Target, types map[string]string, 
 		qc := `"` + strings.ReplaceAll(c, `"`, `""`) + `"`
 
 		sel = append(sel, fmt.Sprintf("COUNT(*) FILTER (WHERE %s IS NULL)", qc))
-		switch cp.role {
-		case roleDate:
+		unusable = append(unusable, fmt.Sprintf("%s IS NULL", qc))
+
+		if cp.role == roleDate {
+			past := fmt.Sprintf("%s < DATE '%s'", qc, minPlausibleDate)
+			future := fmt.Sprintf("%s > (TIMESTAMP '%s' + INTERVAL %s)", qc, nowLit, futureSlack)
 			sel = append(sel,
-				fmt.Sprintf("COUNT(*) FILTER (WHERE %s < DATE '%s')", qc, minPlausibleDate),
-				fmt.Sprintf("COUNT(*) FILTER (WHERE %s > (TIMESTAMP '%s' + INTERVAL %s))",
-					qc, now.UTC().Format("2006-01-02 15:04:05"), futureSlack))
-		case roleKey:
-			sel = append(sel, fmt.Sprintf("COUNT(DISTINCT %s)", qc))
+				fmt.Sprintf("COUNT(*) FILTER (WHERE %s)", past),
+				fmt.Sprintf("COUNT(*) FILTER (WHERE %s)", future))
+			unusable = append(unusable, past, future)
 		}
 		tp.cols = append(tp.cols, cp)
 	}
+
+	// U in one filter: a row survives when none of the failure conditions hold.
+	usableExpr := "COUNT(*)"
+	if len(unusable) > 0 {
+		usableExpr = fmt.Sprintf("COUNT(*) FILTER (WHERE NOT (%s))",
+			strings.Join(unusable, " OR "))
+	}
+	sel = append(sel, usableExpr)
 
 	rows, err := q.QueryContext(ctx,
 		"SELECT "+strings.Join(sel, ", ")+" FROM ("+t.View+")")
@@ -431,16 +449,13 @@ func profile(ctx context.Context, q Queryer, t Target, types map[string]string, 
 	for i := range tp.cols {
 		tp.cols[i].nulls = asInt64(scan[at])
 		at++
-		switch tp.cols[i].role {
-		case roleDate:
+		if tp.cols[i].role == roleDate {
 			tp.cols[i].past = asInt64(scan[at])
 			tp.cols[i].future = asInt64(scan[at+1])
 			at += 2
-		case roleKey:
-			tp.cols[i].distinct = asInt64(scan[at])
-			at++
 		}
 	}
+	tp.usable = asInt64(scan[at])
 	return tp, rows.Err()
 }
 

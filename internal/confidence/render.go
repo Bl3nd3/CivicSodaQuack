@@ -30,6 +30,12 @@ func mark(l Level) string {
 	return markUnknown
 }
 
+// Tagline states what the number is, in the words every renderer uses. It is
+// a definition rather than a caveat: R is a measured share of records, and a
+// reader who knows that needs no further warning against reading it as a
+// probability that the finding is correct.
+const Tagline = "the share of records this query reads that are present and usable"
+
 // RenderOptions tunes the text block.
 type RenderOptions struct {
 	// Width is the wrap column for detail lines. Zero uses 76.
@@ -71,8 +77,7 @@ func RenderText(w io.Writer, r *Report, opts RenderOptions) {
 		return
 	}
 
-	fmt.Fprintf(w, "%sConfidence: %d%% (%s) — data fitness, not accuracy of the finding\n",
-		p, r.Score, r.Band)
+	fmt.Fprintf(w, "%sConfidence: %d%% (%s) — %s\n", p, r.Score, r.Band, Tagline)
 	// Coverage is printed only when something could not be checked. At full
 	// coverage the line adds nothing; below it, the score is a verdict on less
 	// than the whole catalogue and must not be read as if it were not.
