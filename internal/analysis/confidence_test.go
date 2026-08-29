@@ -374,9 +374,12 @@ func TestRun_ConcentrationUsesTheReturnedRows(t *testing.T) {
 	}
 }
 
-// Repeat assessments of the same datasets must not re-scan them.
-func TestConfidence_IsCachedAcrossQueries(t *testing.T) {
-	path := newCorruptionDB(t, fixture{rows: 1000})
+// Repeat assessments of the same datasets reuse the cached profile, but must
+// hand back independent copies: the caller appends a result-level signal to
+// what it receives, and on a shared pointer that append would accumulate
+// across runs and race two concurrent HTTP handlers.
+func TestConfidence_IsCachedButCopied(t *testing.T) {
+	path := newCorruptionDB(t, fixture{rows: expectedContracts})
 	s, err := Open([]DBSpec{{Path: path}})
 	if err != nil {
 		t.Fatal(err)
@@ -392,8 +395,80 @@ func TestConfidence_IsCachedAcrossQueries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second {
-		t.Error("a repeated assessment re-profiled instead of using the cache")
+
+	if first == second {
+		t.Error("the cache handed back its own pointer; a caller could mutate it")
+	}
+	if first.Score != second.Score || len(first.Signals) != len(second.Signals) {
+		t.Errorf("copies disagree: %d/%d vs %d/%d",
+			first.Score, len(first.Signals), second.Score, len(second.Signals))
+	}
+
+	// Mutating one must leave the other, and the cache, untouched.
+	first.Signals = append(first.Signals, confidence.Signal{Name: "injected"})
+	third, err := s.Confidence(ctx, "corruption", "top-vendors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Signals) != len(second.Signals) {
+		t.Errorf("a mutation leaked into the cache: %d signals, want %d",
+			len(third.Signals), len(second.Signals))
+	}
+}
+
+// The regression this guards: Run appends a concentration signal to the report
+// it gets back, so a shared cached value grew one more signal on every call.
+func TestRun_ConcentrationDoesNotAccumulateAcrossRuns(t *testing.T) {
+	path := newCorruptionDB(t, fixture{rows: expectedContracts})
+	s, err := Open([]DBSpec{{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	count := func() int {
+		res, err := s.Run(ctx, "corruption", "top-vendors", 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, sig := range res.Confidence.Signals {
+			if sig.Name == confidence.SignalConcentration {
+				n++
+			}
+		}
+		return n
+	}
+	first, second, third := count(), count(), count()
+	if first != second || second != third {
+		t.Errorf("concentration signals accumulated across runs: %d, %d, %d",
+			first, second, third)
+	}
+}
+
+// Concurrent runs of the same query must not race on the cached report.
+// Exercised under -race.
+func TestConfidence_ConcurrentRunsAreSafe(t *testing.T) {
+	path := newCorruptionDB(t, fixture{rows: 20000})
+	s, err := Open([]DBSpec{{Path: path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	done := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		go func() {
+			_, err := s.Run(ctx, "corruption", "top-vendors", 0)
+			done <- err
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

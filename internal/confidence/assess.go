@@ -231,6 +231,12 @@ func assessOne(ctx context.Context, q Queryer, t Target, book bookRecord, opts O
 	types, terr := describeView(ctx, q, t)
 	prof, perr := profile(ctx, q, t, types, opts.now())
 
+	// An unmeasured factor contributes nothing to a product, so it reads as 1
+	// rather than 0. Leaving these at zero would publish "nothing survived" for
+	// a table that was merely unreadable — the conflation Assessed exists to
+	// prevent.
+	d.Completeness, d.Usability, d.Retention = 1, 1, 1
+
 	if terr != nil || perr != nil {
 		// The table could not be read at all, so neither factor of U/E can be
 		// measured. Both are Unknown rather than zero: "we could not look" and
@@ -250,7 +256,6 @@ func assessOne(ctx context.Context, q Queryer, t Target, book bookRecord, opts O
 
 		// Record the factorisation so a reader can reconstruct r without
 		// re-deriving it from the signal list.
-		d.Completeness, d.Usability = 1, 1
 		if completeness.Level != Unknown {
 			d.Completeness = clamp01(completeness.Score)
 		}
@@ -258,6 +263,16 @@ func assessOne(ctx context.Context, q Queryer, t Target, book bookRecord, opts O
 			d.Usability = clamp01(usability.Score)
 		}
 		d.Retention = d.Completeness * d.Usability
+	}
+
+	// The age is captured on the assessment's clock so the signal line and the
+	// report-level freshness cannot disagree.
+	if book.upstreamUpdated != nil {
+		days := int(opts.now().Sub(*book.upstreamUpdated).Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		d.AgeDays = &days
 	}
 
 	// Reported beside R, never folded into it. See the package doc.

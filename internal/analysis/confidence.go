@@ -87,13 +87,21 @@ func (s *Session) confidenceFor(ctx context.Context, m *modes.Mode, q modes.Quer
 
 	key := confidenceKey(m.Name, q.Name, targets)
 	if rep, ok := s.confCache.get(key); ok {
-		return rep
+		// A copy, never the cached value. The caller may append a result-level
+		// signal to what it gets back, and on a shared pointer that append
+		// accumulates across runs and races two concurrent HTTP handlers.
+		return rep.Clone()
 	}
 
 	rep := confidence.Assess(ctx, s.host, targets, confidence.Options{})
 	rep.Mode, rep.Query = m.Name, q.Name
-	s.confCache.put(key, rep)
-	return rep
+	if rep.Assessed {
+		// A report that measured nothing is usually a timeout or a transient
+		// read failure. Caching it would hold "not assessed" in front of the
+		// user for the whole TTL with no way to retry.
+		s.confCache.put(key, rep)
+	}
+	return rep.Clone()
 }
 
 // confidenceTargets resolves the datasets one query reads, for each attached
@@ -115,16 +123,26 @@ func (s *Session) confidenceTargets(m *modes.Mode, q modes.Query) []confidence.T
 	}
 	ports := s.snapshot()
 
+	// A single-portal mode executes bindings[0] and nothing else (see
+	// PlanQuery), so scoring anything further would fold in a dataset the
+	// answer never touched. Today every such mode has one binding and the
+	// distinction is invisible; the design explicitly invites a second.
+	if !m.MultiPortal {
+		if len(bindings) == 0 || len(ports) == 0 {
+			return nil
+		}
+		if ok, _ := m.Runnable(q, bindings[0]); !ok {
+			return nil
+		}
+		return confidence.TargetsFor(m, q, ports[0].Alias, bindings[0])
+	}
+
 	var out []confidence.Target
 	for i, b := range bindings {
 		if i >= len(ports) {
 			break
 		}
-		if m.MultiPortal {
-			if ok, _ := m.Comparable(q, b); !ok {
-				continue
-			}
-		} else if ok, _ := m.Runnable(q, b); !ok {
+		if ok, _ := m.Comparable(q, b); !ok {
 			continue
 		}
 		out = append(out, confidence.TargetsFor(m, q, ports[i].Alias, b)...)
