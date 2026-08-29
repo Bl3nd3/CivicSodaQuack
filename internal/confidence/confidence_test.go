@@ -7,56 +7,132 @@ import (
 	"time"
 )
 
-// sig is a terse constructor for scoring tests.
-func sig(name string, level Level, score, weight float64) Signal {
-	return Signal{Name: name, Level: level, Score: score, Weight: weight}
+// sig is a terse constructor for scoring tests: a check with retention r that
+// can cost at most (1 - floor).
+func sig(name string, level Level, r, floor float64) Signal {
+	return Signal{Name: name, Level: level, Score: r, Floor: floor}
 }
 
-func TestScore_IsAWeightedMean(t *testing.T) {
+func TestScore_IsAProductOfRetentions(t *testing.T) {
 	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig("a", Pass, 1.0, 3),
-		sig("b", Warn, 0.5, 1),
+		sig("a", Pass, 0.9, 0),
+		sig("b", Warn, 0.5, 0),
 	}}}}
 	r.finalize()
 
-	// (1*3 + 0.5*1) / 4 = 0.875
-	if r.Score != 88 {
-		t.Errorf("Score = %d, want 88", r.Score)
-	}
-	if r.Band != BandHigh {
-		t.Errorf("Band = %q, want %q", r.Band, BandHigh)
+	// 0.9 × 0.5 = 0.45
+	if r.Score != 45 {
+		t.Errorf("Score = %d, want 45", r.Score)
 	}
 }
 
-// An unmeasurable property is not evidence in either direction. Scoring it as
-// zero would punish a portal for publishing less metadata; scoring it as one
-// would let a gap in the evidence read as a clean bill of health.
-func TestScore_UnknownSignalsAreExcludedNotScored(t *testing.T) {
+// The property that makes two scores comparable: a check that finds nothing
+// wrong leaves the index exactly where it was. R therefore depends only on the
+// defects found, never on how many ways they were looked for.
+func TestScore_APassingCheckDoesNotMoveTheIndex(t *testing.T) {
+	alone := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+		sig("a", Warn, 0.9, 0),
+	}}}}
+	alone.finalize()
+
+	withMore := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+		sig("a", Warn, 0.9, 0),
+		sig("b", Pass, 1.0, 0),
+		sig("c", Pass, 1.0, 0.5),
+	}}}}
+	withMore.finalize()
+
+	if alone.Score != withMore.Score {
+		t.Errorf("passing checks moved the score: %d vs %d", alone.Score, withMore.Score)
+	}
+	if alone.Score != 90 {
+		t.Errorf("Score = %d, want 90", alone.Score)
+	}
+}
+
+// A defect must never be diluted by the checks that passed around it. This is
+// the case the averaged model got wrong: New York holding 54%% of its rows
+// averaged to 90%%.
+func TestScore_DefectsAreNotDilutedByPasses(t *testing.T) {
+	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+		sig(SignalSync, Pass, 1, 0),
+		sig(SignalCompleteness, Fail, 0.54, 0),
+		sig("c", Pass, 1, 0.3), sig("d", Pass, 1, 0.3),
+		sig("e", Pass, 1, 0.4), sig("f", Pass, 1, 0.6),
+	}}}}
+	r.finalize()
+
+	if r.Score != 54 {
+		t.Errorf("Score = %d, want 54 — the passing checks must not lift it", r.Score)
+	}
+}
+
+// Continuity: no threshold may move the score in a jump. The averaged model put
+// a 37-point cliff across a 0.2%% change in completeness.
+func TestScore_IsContinuousAcrossThresholds(t *testing.T) {
+	at := func(ratio float64) int {
+		rep := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+			sig(SignalSync, Pass, 1, 0),
+			completenessSignal(int64(ratio*1000), 1000, bookRecord{}, "t"),
+		}}}}
+		rep.finalize()
+		return rep.Score
+	}
+	above, below := at(0.901), at(0.899)
+	if diff := above - below; diff > 2 {
+		t.Errorf("a %d-point jump across the warn/fail boundary (%d vs %d)",
+			diff, above, below)
+	}
+}
+
+// Monotonicity: more of a defect always costs more, never less.
+func TestScore_IsMonotoneInTheDefect(t *testing.T) {
+	prev := 101
+	for _, ratio := range []float64{1.0, 0.95, 0.9, 0.75, 0.5, 0.25, 0.1} {
+		rep := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+			completenessSignal(int64(ratio*10000), 10000, bookRecord{}, "t"),
+		}}}}
+		rep.finalize()
+		if rep.Score > prev {
+			t.Errorf("score rose to %d at ratio %v after %d", rep.Score, ratio, prev)
+		}
+		prev = rep.Score
+	}
+}
+
+// An unmeasurable property is not evidence in either direction, so it leaves
+// the product alone — and is reported through Coverage instead.
+func TestScore_UnknownSignalsAreExcludedAndLowerCoverage(t *testing.T) {
 	with := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig("a", Pass, 1.0, 3),
-		sig("b", Unknown, 0, 3),
+		sig("a", Pass, 1.0, 0),
+		sig("b", Unknown, 0, 0),
 	}}}}
 	with.finalize()
 
-	without := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig("a", Pass, 1.0, 3),
-	}}}}
-	without.finalize()
-
-	if with.Score != without.Score {
-		t.Errorf("an Unknown signal changed the score: %d vs %d", with.Score, without.Score)
-	}
 	if with.Score != 100 {
-		t.Errorf("Score = %d, want 100", with.Score)
+		t.Errorf("Score = %d, want 100 — an Unknown must not score", with.Score)
+	}
+	if with.Coverage != 50 {
+		t.Errorf("Coverage = %d, want 50", with.Coverage)
 	}
 }
 
-// Advisory signals are shown to the reader but never scored: a dominant vendor
-// is a fact about procurement, not a defect in the data.
-func TestScore_AdvisorySignalsDoNotCount(t *testing.T) {
+func TestScore_FullCoverageWhenEverythingWasMeasured(t *testing.T) {
 	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig("a", Pass, 1.0, 3),
-		sig(SignalConcentration, Warn, 0, 0),
+		sig("a", Pass, 1.0, 0), sig("b", Warn, 0.8, 0),
+	}}}}
+	r.finalize()
+	if r.Coverage != 100 {
+		t.Errorf("Coverage = %d, want 100", r.Coverage)
+	}
+}
+
+// Advisory checks floor at 1, so they cannot move the index. No special case in
+// the arithmetic is needed for that — it falls out of the floor.
+func TestScore_AdvisorySignalsCannotMoveTheIndex(t *testing.T) {
+	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+		sig("a", Pass, 1.0, 0),
+		sig(SignalConcentration, Warn, 1, FloorAdvisory),
 	}}}}
 	r.finalize()
 
@@ -66,48 +142,70 @@ func TestScore_AdvisorySignalsDoNotCount(t *testing.T) {
 	if len(r.Problems()) != 1 {
 		t.Errorf("advisory signal should still be reported as a problem to read")
 	}
+	if r.Coverage != 100 {
+		t.Errorf("Coverage = %d, want 100 — an advisory is not an unmeasured check", r.Coverage)
+	}
 }
 
-// A weighted mean is too forgiving of a dataset that never arrived: seven clean
-// checks on an empty table would average out to "moderate".
-func TestScore_FailedSyncCapsTheScore(t *testing.T) {
-	failed := sig(SignalSync, Fail, 0, weightSync)
-	failed.Cap = CapFailedSync
+// A fatal defect takes the whole index, with no cap needed to force it.
+func TestScore_FatalDefectsZeroTheIndex(t *testing.T) {
 	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		failed,
-		sig("b", Pass, 1, 1), sig("c", Pass, 1, 1), sig("d", Pass, 1, 1),
-		sig("e", Pass, 1, 1), sig("f", Pass, 1, 1), sig("g", Pass, 1, 1),
+		sig(SignalSync, Fail, 0, FloorFatal),
+		sig("b", Pass, 1, 0.3), sig("c", Pass, 1, 0.3), sig("d", Pass, 1, 0.3),
+		sig("e", Pass, 1, 0.3), sig("f", Pass, 1, 0.3), sig("g", Pass, 1, 0.3),
 	}}}}
 	r.finalize()
 
-	if r.Score > CapFailedSync {
-		t.Errorf("Score = %d, want <= %d", r.Score, CapFailedSync)
+	if r.Score != 0 {
+		t.Errorf("Score = %d, want 0", r.Score)
 	}
 	if r.Band != BandInsufficient {
 		t.Errorf("Band = %q, want %q", r.Band, BandInsufficient)
 	}
 }
 
-func TestScore_IncompleteCopyCapsTheScore(t *testing.T) {
-	short := sig(SignalCompleteness, Fail, 0.5, weightCompleteness)
-	short.Cap = CapIncomplete
+// A floor bounds how much one defect can cost, so a survivable fault cannot
+// zero an otherwise sound answer.
+func TestScore_FloorsBoundWhatOneDefectCosts(t *testing.T) {
 	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig(SignalSync, Pass, 1, weightSync),
-		short,
-		sig("c", Pass, 1, 1), sig("d", Pass, 1, 1),
+		sig(SignalFreshness, Fail, 0, FloorFreshness),
 	}}}}
 	r.finalize()
 
-	if r.Score > CapIncomplete {
-		t.Errorf("Score = %d, want <= %d", r.Score, CapIncomplete)
+	if r.Score != 50 {
+		t.Errorf("Score = %d, want 50 — the stalest data still retains half", r.Score)
 	}
 }
 
-// Nothing measurable must read as "assessed and terrible" rather than
+// A retention factor below its declared floor is clamped: a transfer function
+// cannot cost more than the severity the check declared.
+func TestRetention_IsClampedToTheFloor(t *testing.T) {
+	s := sig("x", Fail, -0.5, 0.4)
+	if got := s.retention(); got != 0.4 {
+		t.Errorf("retention = %v, want 0.4", got)
+	}
+	if got := (sig("y", Pass, 2, 0)).retention(); got != 1 {
+		t.Errorf("retention = %v, want 1", got)
+	}
+}
+
+// A non-zero product must not round down to zero: "0%%" is reserved for
+// "nothing behind this answer at all".
+func TestScore_TinyButNonZeroDoesNotReadAsFatal(t *testing.T) {
+	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
+		sig("a", Fail, 0.001, 0),
+	}}}}
+	r.finalize()
+	if r.Score != 1 {
+		t.Errorf("Score = %d, want 1", r.Score)
+	}
+}
+
+// Nothing measurable must read as// Nothing measurable must read as "assessed and terrible" rather than
 // "not assessed" — they call for opposite responses from the reader.
 func TestScore_NothingMeasurableIsNotAssessed(t *testing.T) {
 	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig("a", Unknown, 0, 3),
+		sig("a", Unknown, 0, 0),
 	}}}}
 	r.finalize()
 
@@ -139,10 +237,10 @@ func TestReport_AlwaysCarriesItsLimits(t *testing.T) {
 
 func TestSignalOrder_PassesThenAdvisoriesThenProblems(t *testing.T) {
 	r := &Report{Datasets: []DatasetReport{{Signals: []Signal{
-		sig("fail", Fail, 0, 1),
-		sig("warn", Warn, 0.5, 1),
-		sig("advisory", Warn, 0, 0),
-		sig("pass", Pass, 1, 1),
+		sig("fail", Fail, 0, 0),
+		sig("warn", Warn, 0.5, 0),
+		sig("advisory", Warn, 1, FloorAdvisory),
+		sig("pass", Pass, 1, 0),
 	}}}}
 	r.finalize()
 
@@ -269,17 +367,34 @@ func TestFreshnessSignal_MeasuresUpstreamNotSync(t *testing.T) {
 	}
 }
 
-func TestFreshnessScore_DecaysMonotonically(t *testing.T) {
-	prev := 2.0
+func TestStaleness_RisesMonotonicallyAndIsBounded(t *testing.T) {
+	prev := -1.0
 	for _, days := range []int{0, 30, 60, 90, 200, 365, 700, 1095, 2000} {
-		got := freshnessScore(days)
-		if got > prev {
-			t.Errorf("freshnessScore(%d) = %v rose above the previous %v", days, got, prev)
+		got := stalenessOf(days)
+		if got < prev {
+			t.Errorf("stalenessOf(%d) = %v fell below the previous %v", days, got, prev)
 		}
 		if got < 0 || got > 1 {
-			t.Errorf("freshnessScore(%d) = %v out of [0,1]", days, got)
+			t.Errorf("stalenessOf(%d) = %v out of [0,1]", days, got)
 		}
 		prev = got
+	}
+}
+
+// The transfer function is the model's one shared curve, so it is worth
+// pinning: full retention at no defect, exactly the floor at saturation, and
+// linear between.
+func TestRetain_TransferFunction(t *testing.T) {
+	cases := []struct {
+		floor, severity, want float64
+	}{
+		{0.5, 0, 1}, {0.5, 1, 0.5}, {0.5, 0.5, 0.75},
+		{0, 1, 0}, {0.3, 2, 0.3}, {0.3, -1, 1},
+	}
+	for _, c := range cases {
+		if got := retain(c.floor, c.severity); got != c.want {
+			t.Errorf("retain(%v, %v) = %v, want %v", c.floor, c.severity, got, c.want)
+		}
 	}
 }
 

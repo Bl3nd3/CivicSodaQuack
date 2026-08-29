@@ -195,15 +195,17 @@ func TestConfidence_ImpossibleDatesAreCaught(t *testing.T) {
 	}
 }
 
-func TestConfidence_FailedSyncCapsTheScore(t *testing.T) {
+func TestConfidence_FailedSyncZeroesTheScore(t *testing.T) {
 	path := newCorruptionDB(t, fixture{rows: 1000, syncStatus: "error"})
 	rep := assess(t, path, "top-vendors")
 
 	if s := signalNamed(t, rep, confidence.SignalSync); s.Level != confidence.Fail {
 		t.Errorf("sync = %v, want Fail", s.Level)
 	}
-	if rep.Score > confidence.CapFailedSync {
-		t.Errorf("Score = %d, want <= %d", rep.Score, confidence.CapFailedSync)
+	// A failed sync floors at zero retention, so it takes the whole index with
+	// it — no cap needed to force the result.
+	if rep.Score != 0 {
+		t.Errorf("Score = %d, want 0", rep.Score)
 	}
 }
 

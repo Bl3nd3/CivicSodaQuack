@@ -24,24 +24,6 @@ const (
 	SignalConcentration = "concentration"
 )
 
-// Signal weights. They are constants rather than tuning knobs on purpose: a
-// score whose weights move between runs is not comparable with itself, and the
-// point of this number is to be compared across queries and across cities.
-//
-// The ordering encodes a claim about what ruins an answer fastest. Whether the
-// data arrived at all, and whether all of it arrived, outrank whether it is
-// current; being current outranks the shape of individual columns.
-const (
-	weightSync         = 3.0
-	weightCompleteness = 3.0
-	weightFreshness    = 2.0
-	weightLag          = 2.0
-	weightRowIntegrity = 2.0
-	weightNulls        = 2.0
-	weightDates        = 2.0
-	weightKeys         = 1.0
-)
-
 // Target is one dataset a query reads, described in the mode's own vocabulary.
 type Target struct {
 	// Portal is the alias of the attached database holding the table.
@@ -263,7 +245,7 @@ func assessOne(ctx context.Context, q Queryer, t Target, book bookRecord, opts O
 	switch {
 	case terr != nil || perr != nil:
 		d.Signals = append(d.Signals, Signal{
-			Name: SignalNullDensity, Level: Unknown, Weight: weightNulls, Dataset: label,
+			Name: SignalNullDensity, Level: Unknown, Floor: FloorNulls, Dataset: label,
 			Label:  fmt.Sprintf("could not profile %s", label),
 			Detail: firstErr(terr, perr),
 		})

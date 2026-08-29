@@ -19,24 +19,69 @@
 // renderers in this package emit all three together. A bare "82%" is exactly
 // the kind of number this project exists to stop people from quoting.
 //
-// # The model
+// # The formula
 //
-// Each signal scores in [0,1] and carries a fixed weight. The report score is
-// the weighted mean over every signal that could be evaluated, expressed as a
-// percentage. Signals that could not be evaluated (Unknown) are excluded from
-// both sides of that mean rather than being scored as zero or as one — an
-// unmeasurable property is not evidence in either direction, and guessing
-// would let a portal that publishes less metadata score higher or lower for
-// reasons that have nothing to do with its data.
+// Reliability is a product, not an average:
 //
-// Two failures then cap the result outright, because a weighted mean is too
-// forgiving of them: a dataset that never synced or whose last sync failed
-// caps the score at CapFailedSync, and a materially short copy caps it at
-// CapIncomplete. A missing dataset must never average out to "moderate".
+//	R = ∏ r_i        over every check that was actually performed
 //
-// Advisory signals (Weight 0) are reported but never scored. Concentration is
-// the example: one vendor holding 61% of a department's spend is a fact worth
-// putting in front of a reader, and it is not a defect in the data.
+// Each check returns a retention factor r_i in [floor_i, 1] — the share of the
+// answer's trustworthiness that survives it. A check that finds nothing wrong
+// returns 1 and leaves R untouched. floor_i is the check's severity, stated as
+// the most trust a single defect of that kind can destroy: a failed sync floors
+// at 0 (no data, no reliability), stale data floors at 0.5 (old data is
+// degraded, never worthless). The floors are the only tuning constants, and
+// each one is a sentence in English rather than a coefficient.
+//
+// Every check maps its measurement to r_i through a documented, monotone
+// transfer function — for a rate x of bad rows,
+//
+//	r = 1 - (1 - floor) × min(1, x / zeroAt)
+//
+// so r falls linearly from 1 at x=0 to floor at x=zeroAt, and stays there.
+//
+// # Why a product
+//
+// A weighted mean was the obvious first choice and it is wrong here, for three
+// reasons that a product fixes at once.
+//
+// It dilutes. Averaged, New York's complaint data scores 90% while holding 54%
+// of its rows: six passing checks outvote the one that matters. Multiplied it
+// scores 49%, because a check that finds half the data missing removes half the
+// reliability no matter how many other checks pass.
+//
+// It needs caps, and caps introduce cliffs. Rescuing the mean meant clamping
+// the score when a critical check failed, which put a 37-point discontinuity
+// across a 0.2% change in completeness. R is continuous and monotone in every
+// input: more of a defect always lowers the score, by an amount proportional to
+// the defect, and no threshold ever moves it in a jump.
+//
+// It is not comparable with itself. A mean's denominator changes with how many
+// checks happened to be measurable, so two 80% scores from different datasets
+// need not mean the same thing. A product has no denominator. Adding a check
+// that passes leaves R exactly where it was, so R depends only on the defects
+// found — never on how many ways they were looked for.
+//
+// # Uncertainty is reported, not averaged in
+//
+// A check that could not be run is excluded from the product, which means an
+// unmeasured check and a passing one move R identically. That would let a gap
+// in the evidence read as a clean bill of health, so the gap is carried
+// alongside R rather than inside it: Coverage is the share of applicable checks
+// that were actually performed. 95% at full coverage and 95% at half coverage
+// are different claims, and no single number can hold both.
+//
+// # What R is not
+//
+// It is an index, not a probability. Nothing here is calibrated against known
+// outcomes, so R does not estimate the chance that an answer is wrong. What it
+// guarantees is consistency: the same defects always produce the same number,
+// and two scores built from this catalogue are comparable with each other.
+//
+// Advisory checks have floor 1. They can cost nothing, so they never move R and
+// need no special case in the arithmetic — concentration is reported to the
+// reader because one vendor holding 61% of a total is worth knowing, and it is
+// not a defect in the data.
 package confidence
 
 import (
@@ -60,15 +105,32 @@ const (
 	Unknown Level = "unknown"
 )
 
-// Score caps a failing signal can impose through Signal.Cap.
+// Severity floors: the most trust one defect of each kind can destroy.
 //
-// CapFailedSync is for failures that mean there is nothing behind the answer
-// at all — a sync that never ran, failed, or was interrupted, and a table that
-// holds no rows. CapIncomplete is for a copy that arrived but is materially
-// short of what the portal holds.
+// These are the only tuning constants in the model, and each is a claim in
+// English rather than a coefficient. A floor of 0 means the defect is fatal —
+// there is nothing behind the answer at all. A floor of 1 means the check is
+// advisory and cannot move the index.
 const (
-	CapFailedSync = 30
-	CapIncomplete = 60
+	// FloorFatal is for defects that leave no data behind the answer: a sync
+	// that never ran, failed, or was interrupted, and a table with no rows.
+	FloorFatal = 0.0
+	// FloorRows is for rows that arrived and then went missing relative to
+	// what the sync recorded writing.
+	FloorRows = 0.3
+	// FloorNulls is for the emptiest column the query reads.
+	FloorNulls = 0.3
+	// FloorDates is for timestamps that cannot be real.
+	FloorDates = 0.4
+	// FloorFreshness is for data the portal stopped updating. Old data is
+	// degraded, never worthless, so this check can cost at most half.
+	FloorFreshness = 0.5
+	// FloorLag is for a local copy behind a portal that has moved on.
+	FloorLag = 0.6
+	// FloorKeys is for null identifiers, which drop rows out of a join.
+	FloorKeys = 0.7
+	// FloorAdvisory marks a check that is reported but cannot move the index.
+	FloorAdvisory = 1.0
 )
 
 // Band names a score range in words, so an interface can lead with the
@@ -89,32 +151,44 @@ type Signal struct {
 	// Detail expands on the label when the reason matters more than the fact.
 	Detail string `json:"detail,omitempty"`
 	Level  Level  `json:"level"`
-	// Score is this signal's contribution in [0,1]. Meaningless when the level
-	// is Unknown or the weight is zero.
+	// Score is this check's retention factor r in [Floor, 1]: the share of the
+	// answer's trustworthiness that survives it. 1 means the check found
+	// nothing wrong and leaves the reliability index untouched. Meaningless
+	// when the level is Unknown.
 	Score float64 `json:"score"`
-	// Weight is the signal's share of the weighted mean. Zero marks an
-	// advisory signal: reported to the reader, excluded from the arithmetic.
-	Weight float64 `json:"weight"`
+	// Floor is the lowest retention this check can return — its severity,
+	// stated as the most trust a single defect of this kind can destroy.
+	// A fatal check floors at 0; an advisory one floors at 1, which is what
+	// makes it unable to move the index without needing a special case.
+	Floor float64 `json:"floor"`
 	// Dataset is the table this was measured on; empty for report-level
 	// signals derived from the result rows rather than from a table.
 	Dataset string `json:"dataset,omitempty"`
-
-	// Cap is the highest score the report may carry when this signal fails.
-	// Zero means the signal only contributes to the weighted mean.
-	//
-	// It lives on the signal rather than in the aggregator because which
-	// failures are disqualifying is a property of what was measured, not of
-	// the arithmetic. A weighted mean is far too forgiving of a dataset that
-	// never arrived: seven clean column checks on an empty table would
-	// otherwise average out to "moderate".
-	Cap int `json:"cap,omitempty"`
 }
 
-// Advisory reports whether this signal is shown but not scored.
-func (s Signal) Advisory() bool { return s.Weight == 0 }
+// Advisory reports whether this signal is shown but cannot move the index.
+// It is a consequence of the floor, not a flag: a check that can cost nothing
+// multiplies by 1.
+func (s Signal) Advisory() bool { return s.Floor >= 1 }
 
-// counts reports whether this signal participates in the weighted mean.
-func (s Signal) counts() bool { return s.Weight > 0 && s.Level != Unknown }
+// counts reports whether this signal enters the product.
+func (s Signal) counts() bool { return !s.Advisory() && s.Level != Unknown }
+
+// retention clamps the signal's score into the range its floor permits, so a
+// transfer function cannot return a factor outside the severity it declared.
+func (s Signal) retention() float64 {
+	r := s.Score
+	if r < s.Floor {
+		r = s.Floor
+	}
+	if r > 1 {
+		r = 1
+	}
+	if r < 0 {
+		r = 0
+	}
+	return r
+}
 
 // DatasetReport is the assessment of one dataset a query reads.
 type DatasetReport struct {
@@ -181,6 +255,14 @@ type Report struct {
 	// the specific misuse this package has to design against.
 	Limits []string `json:"limits"`
 
+	// Coverage is the share of applicable checks that could actually be
+	// performed, as a percentage. It is reported beside Score rather than
+	// folded into it: an unmeasured check leaves the product untouched, so
+	// without this a gap in the evidence would be indistinguishable from a
+	// clean result. 95% at full coverage and 95% at half coverage are
+	// different claims.
+	Coverage int `json:"coverage"`
+
 	// Assessed is false when no dataset could be profiled at all, in which
 	// case Score is meaningless and interfaces must say "not assessed" rather
 	// than render a zero.
@@ -220,7 +302,7 @@ func Grade(score int) string {
 	}
 }
 
-// finalize computes scores and ordering once every signal has been collected.
+// finalize computes the index and ordering once every check has been collected.
 //
 // Ordering is deliberate: the flattened signal list runs passes, then
 // advisories, then warnings, then failures. A reader scanning the block sees
@@ -229,38 +311,46 @@ func Grade(score int) string {
 func (r *Report) finalize() {
 	r.Limits = append([]string{}, standardLimits...)
 
-	var sum, weight float64
-	capAt := 100
+	product := 1.0
+	measured, unknown := 0, 0
 	for i := range r.Datasets {
 		d := &r.Datasets[i]
 		d.Score, d.Band = scoreSignals(d.Signals)
 		for _, s := range d.Signals {
-			if s.counts() {
-				sum += s.Score * s.Weight
-				weight += s.Weight
+			if s.Advisory() {
+				continue
 			}
-			if s.Level == Fail && s.Cap > 0 {
-				capAt = min(capAt, s.Cap)
+			if s.Level == Unknown {
+				unknown++
+				continue
 			}
+			measured++
+			product *= s.retention()
 		}
 		r.Signals = append(r.Signals, d.Signals...)
 	}
 
-	if weight == 0 {
+	if measured == 0 {
 		// Nothing measurable. Say so rather than reporting a zero, which reads
 		// as "assessed and terrible" instead of "not assessed" — opposite
 		// instructions to a reader. Datasets may still be listed, and the
 		// renderer distinguishes "nothing to profile" from "profiled nothing"
 		// by whether any are present.
 		r.Assessed = false
-		r.Score, r.Band = 0, BandInsufficient
+		r.Score, r.Band, r.Coverage = 0, BandInsufficient, 0
 		sortSignals(r.Signals)
 		return
 	}
 
 	r.Assessed = true
-	r.Score = min(int(sum/weight*100+0.5), capAt)
+	r.Score = pctOf(product)
 	r.Band = Grade(r.Score)
+	// Coverage travels beside the index rather than inside it. A check that
+	// could not be run is excluded from the product, which makes it
+	// indistinguishable from one that passed; saying how much of the intended
+	// scrutiny actually happened is what stops that from reading as a clean
+	// bill of health.
+	r.Coverage = pctOf(float64(measured) / float64(measured+unknown))
 
 	// The stalest input governs the report's freshness.
 	for _, d := range r.Datasets {
@@ -274,24 +364,41 @@ func (r *Report) finalize() {
 	sortSignals(r.Signals)
 }
 
-// scoreSignals computes a weighted mean and band for one signal set.
+// scoreSignals computes the index and band for one signal set.
 func scoreSignals(sigs []Signal) (int, string) {
-	var sum, weight float64
-	capAt := 100
+	product := 1.0
+	measured := 0
 	for _, s := range sigs {
-		if s.counts() {
-			sum += s.Score * s.Weight
-			weight += s.Weight
+		if !s.counts() {
+			continue
 		}
-		if s.Level == Fail && s.Cap > 0 {
-			capAt = min(capAt, s.Cap)
-		}
+		measured++
+		product *= s.retention()
 	}
-	if weight == 0 {
+	if measured == 0 {
 		return 0, BandInsufficient
 	}
-	n := min(int(sum/weight*100+0.5), capAt)
+	n := pctOf(product)
 	return n, Grade(n)
+}
+
+// pctOf rounds a factor in [0,1] to a percentage.
+//
+// A non-zero product never rounds down to 0: "0%" is the report's way of
+// saying there is nothing behind the answer at all, and a very poor score is a
+// different statement from a fatal one.
+func pctOf(f float64) int {
+	if f <= 0 {
+		return 0
+	}
+	n := int(f*100 + 0.5)
+	if n < 1 {
+		return 1
+	}
+	if n > 100 {
+		return 100
+	}
+	return n
 }
 
 // levelRank orders signals for display. Advisories sit between passes and

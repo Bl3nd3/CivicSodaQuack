@@ -463,7 +463,9 @@ function confidenceNodes(c) {
       el('span', { class: 'conf-what' },
         el('b', {}, `Confidence: ${band}`),
         el('span', { class: 'muted' },
-          'Measures whether the data is fit to be queried \u2014 not whether the finding is true.')),
+          c.coverage < 100
+            ? `${c.coverage}% of checks could be run \u2014 the score covers only those.`
+            : 'Measures whether the data is fit to be queried \u2014 not whether the finding is true.')),
       c.freshness_days != null
         ? el('span', { class: 'conf-fresh' },
             el('b', {}, c.freshness_days === 1 ? '1 day' : `${c.freshness_days} days`),

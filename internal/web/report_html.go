@@ -174,7 +174,7 @@ footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     <div class="conf-head">
       <span class="conf-score {{.Band}}">{{.Score}}%</span>
       <span class="conf-what"><b>Confidence: {{.Band}}</b>
-        <span class="muted">Measures whether the data is fit to be queried — not whether the finding is true.</span></span>
+        <span class="muted">Measures whether the data is fit to be queried — not whether the finding is true.{{if lt .Coverage 100}} Only {{.Coverage}}% of checks could be run; the score covers those.{{end}}</span></span>
       {{with .FreshnessLine}}<span class="conf-fresh">{{.}}</span>{{end}}
     </div>
     <ul class="conf-signals">

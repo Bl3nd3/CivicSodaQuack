@@ -108,6 +108,10 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if c := res.Confidence; c != nil && c.Assessed {
 		comment(fmt.Sprintf("# confidence: %d%% (%s) — data fitness, not accuracy of the finding",
 			c.Score, c.Band))
+		if c.Coverage < 100 {
+			comment(fmt.Sprintf("#   %d%% of checks could be run; the score covers only those",
+				c.Coverage))
+		}
 		for _, sig := range c.Problems() {
 			comment("#   ! " + sig.Label)
 		}
