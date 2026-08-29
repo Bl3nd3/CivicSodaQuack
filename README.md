@@ -203,16 +203,13 @@ U   rows held in which every column the query reads carries usable
 The dataset's retention is the share of the intended evidence that survives, and the query's score is the product across its datasets:
 
 ```
-r = U / E                R = ∏ r
+completeness = min(1, H/E)     did the rows arrive
+usability    = U/H             do they carry what the query reads
+
+r = completeness × usability             R = ∏ r
 ```
 
-which factors exactly into the two stages you can act on separately:
-
-```
-U/E  =  H/E    ×   U/H
-        ────       ────
-   completeness   usability     (did it arrive)  (is it populated)
-```
+That is `U/E` whenever the local copy is no larger than the reference count. It parts company with `U/E` only when a dataset has grown since it was mapped: completeness saturates at 1 rather than exceeding it, so surplus rows cannot pay for a defect elsewhere, and the usable share is then measured against what is actually held rather than a stale denominator. Chicago's contracts are the live case — 185,826 held against a 185,699 reference.
 
 **Every term is a count divided by a count.** No weights, no severity coefficients, no saturation points, no thresholds anywhere in the arithmetic — nothing to tune, and therefore nothing to tune wrongly. Two scores are comparable because they are *the same measurement*, not because two tables of constants happened to agree.
 
