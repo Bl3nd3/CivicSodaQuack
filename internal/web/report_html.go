@@ -169,7 +169,7 @@ footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     Only one city qualified, so this is a single-city figure rather than a comparison.</div>
   {{end}}
 
-  {{with .Confidence}}{{if .Assessed}}
+  {{with .Confidence}}{{if .Assessed}}{{$multi := gt (len .Datasets) 1}}
   <div class="confidence">
     <div class="conf-head">
       <span class="conf-score {{.Band}}">{{.Score}}%</span>
@@ -178,9 +178,9 @@ footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
       {{with .FreshnessLine}}<span class="conf-fresh">{{.}}</span>{{end}}
     </div>
     <ul class="conf-signals">
-      {{range .Confirmations}}<li class="conf-sig pass"><span class="conf-mark">&#10003;</span> {{.Label}}</li>{{end}}
-      {{range .Unmeasured}}<li class="conf-sig unknown"><span class="conf-mark">&middot;</span> {{.Label}}</li>{{end}}
-      {{range .Problems}}<li class="conf-sig {{.Level}}"><span class="conf-mark">{{if eq .Level "fail"}}&#10007;{{else}}&#9888;{{end}}</span> {{.Label}}{{with .Detail}}<span class="conf-detail">{{.}}</span>{{end}}</li>{{end}}
+      {{range .Confirmations}}<li class="conf-sig pass"><span class="conf-mark">&#10003;</span> {{if and $multi .Dataset}}{{.Dataset}}: {{end}}{{.Label}}</li>{{end}}
+      {{range .Unmeasured}}<li class="conf-sig unknown"><span class="conf-mark">&middot;</span> {{if and $multi .Dataset}}{{.Dataset}}: {{end}}{{.Label}}</li>{{end}}
+      {{range .Problems}}<li class="conf-sig {{.Level}}"><span class="conf-mark">{{if eq .Level "fail"}}&#10007;{{else}}&#9888;{{end}}</span> {{if and $multi .Dataset}}{{.Dataset}}: {{end}}{{.Label}}{{with .Detail}}<span class="conf-detail">{{.}}</span>{{end}}</li>{{end}}
     </ul>
     <ul class="conf-limits">{{range .Limits}}<li>{{.}}</li>{{end}}</ul>
   </div>

@@ -124,7 +124,11 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 			comment("# " + line)
 		}
 	}
-	if len(res.Caveats) > 0 || len(res.Excluded) > 0 || res.Confidence != nil {
+	// Only when something was actually written above. The confidence block is
+	// skipped for an unassessed report, and a stray empty row is read as the
+	// header by strict CSV parsers, losing the column names.
+	assessed := res.Confidence != nil && res.Confidence.Assessed
+	if len(res.Caveats) > 0 || len(res.Excluded) > 0 || res.NotAComparison || assessed {
 		comment("")
 	}
 
