@@ -1,87 +1,66 @@
 // Copyright (c) 2026 Neomantra Corp
 
-// Package confidence scores how far the data behind an answer can be trusted.
-//
-// Every other part of csq is careful to say what a number cannot support. This
-// package makes that judgement computable: given a query and the datasets it
-// reads, it profiles those datasets and returns a score with the evidence that
-// produced it.
-//
-// The score answers one question and refuses the neighbouring one. It measures
-// **data fitness** — did the sync finish, is the copy complete, is it current,
-// are the columns this query reads actually populated, do the dates fall in a
-// possible range. It says nothing about whether the finding is true, whether
-// the upstream record is accurate, or whether the analysis is the right one.
-// A city that under-reports a category will produce an immaculate 95 here.
-//
-// That distinction is the whole reason the score never travels alone. A Report
-// carries the signals that built it and the limits on reading it, and the
-// renderers in this package emit all three together. A bare "82%" is exactly
-// the kind of number this project exists to stop people from quoting.
+// Package confidence measures how much of the evidence behind an answer
+// actually survives to support it.
 //
 // # The formula
 //
-// Reliability is a product, not an average:
+// For each dataset a query reads, three counts:
 //
-//	R = ∏ r_i        over every check that was actually performed
+//	E  rows the portal holds        (the reference count)
+//	H  rows held locally
+//	U  rows held in which every column the query reads carries usable
+//	   information — not null, and for a timestamp, a date that could be real
 //
-// Each check returns a retention factor r_i in [floor_i, 1] — the share of the
-// answer's trustworthiness that survives it. A check that finds nothing wrong
-// returns 1 and leaves R untouched. floor_i is the check's severity, stated as
-// the most trust a single defect of that kind can destroy: a failed sync floors
-// at 0 (no data, no reliability), stale data floors at 0.5 (old data is
-// degraded, never worthless). The floors are the only tuning constants, and
-// each one is a sentence in English rather than a coefficient.
+// The dataset's retention is the fraction of the intended evidence that
+// survives, and the query's reliability is the product across its datasets:
 //
-// Every check maps its measurement to r_i through a documented, monotone
-// transfer function — for a rate x of bad rows,
+//	r = U / E                R = ∏ r
 //
-//	r = 1 - (1 - floor) × min(1, x / zeroAt)
+// which factors exactly into the two stages a reader can act on separately:
 //
-// so r falls linearly from 1 at x=0 to floor at x=zeroAt, and stays there.
+//	U/E  =  H/E   ×   U/H
+//	        ────      ────
+//	   completeness   usability     (did it arrive)  (is it populated)
 //
-// # Why a product
+// # Why this is the whole model
 //
-// A weighted mean was the obvious first choice and it is wrong here, for three
-// reasons that a product fixes at once.
+// Every term is a count divided by a count. There are no weights, no severity
+// coefficients, no saturation points and no thresholds anywhere in the
+// arithmetic — nothing to tune, and therefore nothing to tune wrongly. Two
+// scores are comparable because they are the same measurement, not because two
+// tables of constants happened to agree.
 //
-// It dilutes. Averaged, New York's complaint data scores 90% while holding 54%
-// of its rows: six passing checks outvote the one that matters. Multiplied it
-// scores 49%, because a check that finds half the data missing removes half the
-// reliability no matter how many other checks pass.
+// R is not an index. It is a quantity with a plain reading: the share of the
+// records the query meant to consult that were actually there and usable. When
+// R is 54%, a count taken from that answer rests on 54% of the records the
+// portal holds. That sentence is the whole interpretation.
 //
-// It needs caps, and caps introduce cliffs. Rescuing the mean meant clamping
-// the score when a critical check failed, which put a 37-point discontinuity
-// across a 0.2% change in completeness. R is continuous and monotone in every
-// input: more of a defect always lowers the score, by an amount proportional to
-// the defect, and no threshold ever moves it in a jump.
+// An earlier version of this package scored eight checks using hand-chosen
+// severity floors and saturation points — about twenty constants, each
+// defensible alone and none of them derived. Six of the eight turned out to be
+// the same measurement wearing different clothes: rows that do not survive.
+// Stating it once removed every constant with it.
 //
-// It is not comparable with itself. A mean's denominator changes with how many
-// checks happened to be measurable, so two 80% scores from different datasets
-// need not mean the same thing. A product has no denominator. Adding a check
-// that passes leaves R exactly where it was, so R depends only on the defects
-// found — never on how many ways they were looked for.
+// # What is deliberately not scored
 //
-// # Uncertainty is reported, not averaged in
+// Freshness and lag are reported beside R, never folded into it. Staleness
+// removes no rows, so it has no reading as evidence loss; and how much
+// 122-day-old data matters depends entirely on the question — fine for a 2023
+// trend, useless for "what happened last week" — which csq cannot know. Any
+// coefficient placed there would be invented, so the age is stated as a fact
+// and left to the reader, who knows what they are asking.
 //
-// A check that could not be run is excluded from the product, which means an
-// unmeasured check and a passing one move R identically. That would let a gap
-// in the evidence read as a clean bill of health, so the gap is carried
-// alongside R rather than inside it: Coverage is the share of applicable checks
-// that were actually performed. 95% at full coverage and 95% at half coverage
-// are different claims, and no single number can hold both.
+// Concentration is likewise reported and never scored: one vendor holding most
+// of a total is a fact about procurement, not a defect in the data.
 //
-// # What R is not
+// # What R does not mean
 //
-// It is an index, not a probability. Nothing here is calibrated against known
-// outcomes, so R does not estimate the chance that an answer is wrong. What it
-// guarantees is consistency: the same defects always produce the same number,
-// and two scores built from this catalogue are comparable with each other.
-//
-// Advisory checks have floor 1. They can cost nothing, so they never move R and
-// need no special case in the arithmetic — concentration is reported to the
-// reader because one vendor holding 61% of a total is worth knowing, and it is
-// not a defect in the data.
+// It measures the evidence, not the truth. A dataset that is complete, current
+// and fully populated scores 100% while recording something other than what a
+// reader believes it records, or recording it with a bias no count can see. R
+// is a ceiling on how much can be known from this corpus, never a statement
+// that the finding is correct.
 package confidence
 
 import (
@@ -91,50 +70,49 @@ import (
 	"time"
 )
 
-// Level is a signal's verdict.
+// Level is how a check is presented to a reader. It is derived from the
+// retention by one rule for every check (see LevelFor) rather than from
+// per-check thresholds, so a warning means the same loss whichever check
+// raised it.
 type Level string
 
 const (
-	// Pass means the property was measured and is sound.
+	// Pass means the check cost nothing: the evidence survived it.
 	Pass Level = "pass"
-	// Warn means the property was measured and is imperfect but usable.
+	// Warn means the check cost something a reader should see.
 	Warn Level = "warn"
-	// Fail means the property was measured and undermines the answer.
+	// Fail means the check removed a large share of the evidence.
 	Fail Level = "fail"
-	// Unknown means the property could not be measured. It never scores.
+	// Unknown means the check could not be run. It never scores.
 	Unknown Level = "unknown"
 )
 
-// Severity floors: the most trust one defect of each kind can destroy.
-//
-// These are the only tuning constants in the model, and each is a claim in
-// English rather than a coefficient. A floor of 0 means the defect is fatal —
-// there is nothing behind the answer at all. A floor of 1 means the check is
-// advisory and cannot move the index.
+// Presentation cutoffs. These label an exact number; they take no part in
+// computing it, and moving one changes an adjective rather than a score.
 const (
-	// FloorFatal is for defects that leave no data behind the answer: a sync
-	// that never ran, failed, or was interrupted, and a table with no rows.
-	FloorFatal = 0.0
-	// FloorRows is for rows that arrived and then went missing relative to
-	// what the sync recorded writing.
-	FloorRows = 0.3
-	// FloorNulls is for the emptiest column the query reads.
-	FloorNulls = 0.3
-	// FloorDates is for timestamps that cannot be real.
-	FloorDates = 0.4
-	// FloorFreshness is for data the portal stopped updating. Old data is
-	// degraded, never worthless, so this check can cost at most half.
-	FloorFreshness = 0.5
-	// FloorLag is for a local copy behind a portal that has moved on.
-	FloorLag = 0.6
-	// FloorKeys is for null identifiers, which drop rows out of a join.
-	FloorKeys = 0.7
-	// FloorAdvisory marks a check that is reported but cannot move the index.
-	FloorAdvisory = 1.0
+	// WarnBelow is the retention under which a check earns a reader's
+	// attention rather than a tick.
+	WarnBelow = 0.999
+	// FailBelow is the retention under which a check has removed enough
+	// evidence to be called a failure.
+	FailBelow = 0.90
 )
 
+// LevelFor derives a check's presentation from what it actually cost.
+func LevelFor(retention float64) Level {
+	switch {
+	case retention >= WarnBelow:
+		return Pass
+	case retention >= FailBelow:
+		return Warn
+	default:
+		return Fail
+	}
+}
+
 // Band names a score range in words, so an interface can lead with the
-// judgement rather than with the arithmetic.
+// judgement rather than the arithmetic. Like Level, these are labels on an
+// exact number rather than inputs to it.
 const (
 	BandHigh         = "high"
 	BandModerate     = "moderate"
@@ -142,75 +120,87 @@ const (
 	BandInsufficient = "insufficient"
 )
 
-// Signal is one measured property of one dataset, and what it contributes.
+// Grade converts a percentage to its band.
+func Grade(score int) string {
+	switch {
+	case score >= 95:
+		return BandHigh
+	case score >= 80:
+		return BandModerate
+	case score >= 50:
+		return BandLow
+	default:
+		return BandInsufficient
+	}
+}
+
+// Kind separates what enters R from what is reported beside it.
+type Kind string
+
+const (
+	// Scored checks are measured row losses and multiply into R.
+	Scored Kind = "scored"
+	// Diagnostic checks explain or qualify the result without scoring. They
+	// are not a lesser class of evidence — freshness is often the most
+	// important line in the block — they are simply not evidence loss.
+	Diagnostic Kind = "diagnostic"
+)
+
+// Signal is one check, and what it cost.
 type Signal struct {
-	// Name is a stable slug, e.g. "freshness". Interfaces group on it.
+	// Name is a stable slug, e.g. "usability". Interfaces group on it.
 	Name string `json:"name"`
 	// Label is the one-line sentence a reader sees next to a ✓ or ⚠.
 	Label string `json:"label"`
 	// Detail expands on the label when the reason matters more than the fact.
 	Detail string `json:"detail,omitempty"`
 	Level  Level  `json:"level"`
-	// Score is this check's retention factor r in [Floor, 1]: the share of the
-	// answer's trustworthiness that survives it. 1 means the check found
-	// nothing wrong and leaves the reliability index untouched. Meaningless
-	// when the level is Unknown.
+	Kind   Kind   `json:"kind"`
+
+	// Score is the retention: the fraction of rows surviving this check, and
+	// the factor it contributes to R. Meaningless for a Diagnostic, and for a
+	// Scored check whose level is Unknown.
 	Score float64 `json:"score"`
-	// Floor is the lowest retention this check can return — its severity,
-	// stated as the most trust a single defect of this kind can destroy.
-	// A fatal check floors at 0; an advisory one floors at 1, which is what
-	// makes it unable to move the index without needing a special case.
-	Floor float64 `json:"floor"`
-	// Dataset is the table this was measured on; empty for report-level
-	// signals derived from the result rows rather than from a table.
+
+	// Lost and Of are the counts Score was computed from, carried so a reader
+	// can reconstruct the arithmetic rather than take it on trust.
+	Lost int64 `json:"lost,omitempty"`
+	Of   int64 `json:"of,omitempty"`
+
+	// Dataset is the table this was measured on; empty for report-level checks
+	// derived from the result rows rather than from a table.
 	Dataset string `json:"dataset,omitempty"`
 }
 
-// Advisory reports whether this signal is shown but cannot move the index.
-// It is a consequence of the floor, not a flag: a check that can cost nothing
-// multiplies by 1.
-func (s Signal) Advisory() bool { return s.Floor >= 1 }
+// counts reports whether this check contributes a factor to R.
+func (s Signal) counts() bool { return s.Kind == Scored && s.Level != Unknown }
 
-// counts reports whether this signal enters the product.
-func (s Signal) counts() bool { return !s.Advisory() && s.Level != Unknown }
-
-// retention clamps the signal's score into the range its floor permits, so a
-// transfer function cannot return a factor outside the severity it declared.
-func (s Signal) retention() float64 {
-	r := s.Score
-	if r < s.Floor {
-		r = s.Floor
-	}
-	if r > 1 {
-		r = 1
-	}
-	if r < 0 {
-		r = 0
-	}
-	return r
-}
+// Advisory reports whether this check is shown but never scored.
+func (s Signal) Advisory() bool { return s.Kind == Diagnostic }
 
 // DatasetReport is the assessment of one dataset a query reads.
 type DatasetReport struct {
-	// Table is the local DuckDB table.
-	Table string `json:"table"`
-	// DatasetID is the Socrata 4x4 it was synced from.
+	Table     string `json:"table"`
 	DatasetID string `json:"dataset_id,omitempty"`
-	// Name is the upstream dataset title.
-	Name string `json:"name,omitempty"`
-	// Portal is the alias of the attached database holding it.
-	Portal string `json:"portal"`
-	// Concept is the logical role this dataset plays in the mode.
-	Concept string `json:"concept,omitempty"`
-	// Rows held locally.
+	Name      string `json:"name,omitempty"`
+	Portal    string `json:"portal"`
+	Concept   string `json:"concept,omitempty"`
+
+	// The three counts the formula is built from.
+	Expected int64 `json:"expected"` // E, zero when no reference count exists
+	Held     int64 `json:"held"`     // H
+	Usable   int64 `json:"usable"`   // U
+
+	// The factorisation, for reporting. Retention is the product of the two.
+	Completeness float64 `json:"completeness"` // H/E
+	Usability    float64 `json:"usability"`    // U/H
+	Retention    float64 `json:"retention"`    // U/E
+
+	// Rows is Held under the name interfaces already display it by.
 	Rows int64 `json:"rows"`
-	// ExpectedRows is the reference count completeness was measured against,
-	// zero when none was available.
-	ExpectedRows int64 `json:"expected_rows,omitempty"`
-	// UpstreamUpdated is when the portal last changed this dataset's data.
+
 	UpstreamUpdated *time.Time `json:"upstream_updated,omitempty"`
-	// LastSynced is when csq last pulled it successfully.
-	LastSynced *time.Time `json:"last_synced,omitempty"`
+	LastSynced      *time.Time `json:"last_synced,omitempty"`
 
 	Signals []Signal `json:"signals"`
 	Score   int      `json:"score"`
@@ -226,116 +216,79 @@ func (d DatasetReport) FreshnessDays() (int, bool) {
 	return int(time.Since(*d.UpstreamUpdated).Hours() / 24), true
 }
 
-// Report is the confidence assessment for one query.
+// Report is the assessment for one query.
 type Report struct {
-	// Mode and Query name what was assessed.
 	Mode  string `json:"mode,omitempty"`
 	Query string `json:"query,omitempty"`
 
-	// Score is the weighted mean as a percentage, after caps.
-	Score int `json:"score"`
-	// Band is Score in words.
-	Band string `json:"band"`
-	// Headline is the one-line summary of what the score is about.
-	Headline string `json:"headline,omitempty"`
+	// Score is R as a percentage: the share of the evidence the query meant to
+	// read that survived to support the answer.
+	Score int    `json:"score"`
+	Band  string `json:"band"`
 
-	// Datasets is the per-dataset detail, in the order the query reads them.
 	Datasets []DatasetReport `json:"datasets"`
-	// Signals is every signal from every dataset plus any report-level ones,
-	// flattened for rendering: passes first, then warnings, then failures.
-	Signals []Signal `json:"signals"`
+	Signals  []Signal        `json:"signals"`
 
-	// FreshnessDays is the age of the *stalest* dataset the query reads,
-	// because a join is only as current as its oldest input. Nil when no
-	// dataset reports an upstream timestamp.
+	// FreshnessDays is the age of the stalest dataset the query reads, because
+	// a join is only as current as its oldest input. Reported, never scored.
 	FreshnessDays *int `json:"freshness_days,omitempty"`
 
-	// Limits states what this score does not mean. It is populated on every
-	// report and rendered with it; a fitness score read as a truth score is
-	// the specific misuse this package has to design against.
-	Limits []string `json:"limits"`
-
-	// Coverage is the share of applicable checks that could actually be
-	// performed, as a percentage. It is reported beside Score rather than
-	// folded into it: an unmeasured check leaves the product untouched, so
-	// without this a gap in the evidence would be indistinguishable from a
-	// clean result. 95% at full coverage and 95% at half coverage are
-	// different claims.
+	// Coverage is the share of scored checks that could actually be run. A
+	// check that could not run leaves the product untouched, which makes it
+	// indistinguishable from one that cost nothing; this is what keeps a gap
+	// in the evidence from reading as a clean result.
 	Coverage int `json:"coverage"`
 
-	// Assessed is false when no dataset could be profiled at all, in which
-	// case Score is meaningless and interfaces must say "not assessed" rather
-	// than render a zero.
-	Assessed bool `json:"assessed"`
-	// Elapsed is how long the profiling pass took.
-	Elapsed string `json:"elapsed,omitempty"`
+	// Limits states what this number does not mean.
+	Limits []string `json:"limits"`
+
+	// Assessed is false when nothing could be measured, in which case Score is
+	// meaningless and interfaces must say "not assessed" rather than show a
+	// zero — the two instruct a reader to do opposite things.
+	Assessed bool   `json:"assessed"`
+	Elapsed  string `json:"elapsed,omitempty"`
 }
 
 // standardLimits is attached to every report. These are not caveats about the
-// civic data — the modes carry those — but about the score itself.
+// civic data — the modes carry those — but about the number itself.
 var standardLimits = []string{
-	"This scores whether the data is fit to be queried, not whether the answer " +
-		"is true. Well-formed data can still be wrong, biased, or measuring " +
-		"something other than what you think.",
+	"This measures how much of the evidence survives, not whether the answer is " +
+		"true. Data that is complete, current and fully populated can still record " +
+		"something other than what you think it records.",
 	"Completeness is measured against a reference row count recorded when the " +
 		"dataset was mapped, not against a live count from the portal. A dataset " +
 		"that grew or was revised upstream will not match it exactly.",
-	"Only the columns this query reads are profiled. A clean score says nothing " +
+	"Only the columns this query reads are examined. A high score says nothing " +
 		"about the rest of the table.",
-	"Freshness is the portal's own data_updated_at. It moves when a portal " +
-		"republishes unchanged rows, so a recent timestamp is evidence that " +
-		"something was published, not that the data changed. Read the dataset's " +
-		"description before calling anything current.",
+	"Freshness is reported but never scored. How much a stale dataset matters " +
+		"depends on the question being asked, which csq cannot know — read the age " +
+		"beside the score and judge it yourself.",
 }
 
-// Grade converts a percentage to its band.
-func Grade(score int) string {
-	switch {
-	case score >= 85:
-		return BandHigh
-	case score >= 65:
-		return BandModerate
-	case score >= 40:
-		return BandLow
-	default:
-		return BandInsufficient
-	}
-}
-
-// finalize computes the index and ordering once every check has been collected.
-//
-// Ordering is deliberate: the flattened signal list runs passes, then
-// advisories, then warnings, then failures. A reader scanning the block sees
-// what held up before what did not, which is the order the evidence should be
-// weighed in — and the problems land last, where the eye stops.
+// finalize computes R and the display ordering once every check is collected.
 func (r *Report) finalize() {
 	r.Limits = append([]string{}, standardLimits...)
 
 	product := 1.0
-	measured, unknown := 0, 0
+	measured, unmeasured := 0, 0
 	for i := range r.Datasets {
 		d := &r.Datasets[i]
 		d.Score, d.Band = scoreSignals(d.Signals)
 		for _, s := range d.Signals {
-			if s.Advisory() {
+			if s.Kind != Scored {
 				continue
 			}
 			if s.Level == Unknown {
-				unknown++
+				unmeasured++
 				continue
 			}
 			measured++
-			product *= s.retention()
+			product *= clamp01(s.Score)
 		}
 		r.Signals = append(r.Signals, d.Signals...)
 	}
 
 	if measured == 0 {
-		// Nothing measurable. Say so rather than reporting a zero, which reads
-		// as "assessed and terrible" instead of "not assessed" — opposite
-		// instructions to a reader. Datasets may still be listed, and the
-		// renderer distinguishes "nothing to profile" from "profiled nothing"
-		// by whether any are present.
 		r.Assessed = false
 		r.Score, r.Band, r.Coverage = 0, BandInsufficient, 0
 		sortSignals(r.Signals)
@@ -345,14 +298,8 @@ func (r *Report) finalize() {
 	r.Assessed = true
 	r.Score = pctOf(product)
 	r.Band = Grade(r.Score)
-	// Coverage travels beside the index rather than inside it. A check that
-	// could not be run is excluded from the product, which makes it
-	// indistinguishable from one that passed; saying how much of the intended
-	// scrutiny actually happened is what stops that from reading as a clean
-	// bill of health.
-	r.Coverage = pctOf(float64(measured) / float64(measured+unknown))
+	r.Coverage = pctOf(float64(measured) / float64(measured+unmeasured))
 
-	// The stalest input governs the report's freshness.
 	for _, d := range r.Datasets {
 		if days, ok := d.FreshnessDays(); ok {
 			if r.FreshnessDays == nil || days > *r.FreshnessDays {
@@ -364,7 +311,7 @@ func (r *Report) finalize() {
 	sortSignals(r.Signals)
 }
 
-// scoreSignals computes the index and band for one signal set.
+// scoreSignals computes R and its band for one dataset's checks.
 func scoreSignals(sigs []Signal) (int, string) {
 	product := 1.0
 	measured := 0
@@ -373,7 +320,7 @@ func scoreSignals(sigs []Signal) (int, string) {
 			continue
 		}
 		measured++
-		product *= s.retention()
+		product *= clamp01(s.Score)
 	}
 	if measured == 0 {
 		return 0, BandInsufficient
@@ -382,11 +329,21 @@ func scoreSignals(sigs []Signal) (int, string) {
 	return n, Grade(n)
 }
 
+func clamp01(f float64) float64 {
+	if f < 0 {
+		return 0
+	}
+	if f > 1 {
+		return 1
+	}
+	return f
+}
+
 // pctOf rounds a factor in [0,1] to a percentage.
 //
-// A non-zero product never rounds down to 0: "0%" is the report's way of
-// saying there is nothing behind the answer at all, and a very poor score is a
-// different statement from a fatal one.
+// A non-zero product never rounds down to 0: "0%" is reserved for "there is
+// nothing behind this answer at all", which is a different statement from a
+// very poor score.
 func pctOf(f float64) int {
 	if f <= 0 {
 		return 0
@@ -401,8 +358,9 @@ func pctOf(f float64) int {
 	return n
 }
 
-// levelRank orders signals for display. Advisories sit between passes and
-// warnings: they are not problems, but they are things to read.
+// levelRank orders checks for display: what held up, then what could not be
+// checked, then what to read, then what failed. Problems land last, where the
+// eye stops.
 func levelRank(s Signal) int {
 	switch s.Level {
 	case Pass:
@@ -426,8 +384,7 @@ func sortSignals(sigs []Signal) {
 	})
 }
 
-// Problems returns the signals a reader must not miss: every warning and
-// failure, advisories included.
+// Problems returns every warning and failure, advisories included.
 func (r *Report) Problems() []Signal {
 	var out []Signal
 	for _, s := range r.Signals {
@@ -438,7 +395,7 @@ func (r *Report) Problems() []Signal {
 	return out
 }
 
-// Confirmations returns the signals that held up.
+// Confirmations returns the checks that cost nothing.
 func (r *Report) Confirmations() []Signal {
 	var out []Signal
 	for _, s := range r.Signals {
@@ -449,9 +406,9 @@ func (r *Report) Confirmations() []Signal {
 	return out
 }
 
-// Unmeasured returns the signals that could not be evaluated. These are worth
-// surfacing separately: "we did not check" and "we checked and it was fine"
-// are different claims, and collapsing them is how a gap becomes a guarantee.
+// Unmeasured returns the checks that could not be run. "We did not check" and
+// "we checked and it was fine" are different claims, and collapsing them is
+// how a gap becomes a guarantee.
 func (r *Report) Unmeasured() []Signal {
 	var out []Signal
 	for _, s := range r.Signals {

@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/neomantra/CivicSodaQuack/internal/confidence"
 )
 
 // ExportRowLimit caps an export.
@@ -106,8 +108,8 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	// hedge, and "these figures come from a copy holding 54% of the dataset" is
 	// not a footnote a reader can be expected to go back for.
 	if c := res.Confidence; c != nil && c.Assessed {
-		comment(fmt.Sprintf("# confidence: %d%% (%s) — data fitness, not accuracy of the finding",
-			c.Score, c.Band))
+		comment(fmt.Sprintf("# confidence: %d%% (%s) — %s",
+			c.Score, c.Band, confidence.Tagline))
 		if c.Coverage < 100 {
 			comment(fmt.Sprintf("#   %d%% of checks could be run; the score covers only those",
 				c.Coverage))
