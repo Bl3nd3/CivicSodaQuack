@@ -264,9 +264,11 @@ func runModeQueries(args []string) error {
 			m.Name, len(dbPaths))
 	}
 
-	// Attach every portal READ_ONLY. Read-only attach lets these queries run
-	// alongside an MCP server or a sync holding the same file, and nothing here
-	// ever writes.
+	// Attach every portal READ_ONLY: nothing here ever writes, and other
+	// readers of the same file are free to run alongside. This does not buy
+	// coexistence with a writer — DuckDB's file lock is mutually exclusive
+	// between processes in either order, so a concurrent csq sync fails the
+	// attach below rather than yielding a stale read.
 	host, err := sql.Open("duckdb", ":memory:")
 	if err != nil {
 		return fmt.Errorf("open host: %w", err)
