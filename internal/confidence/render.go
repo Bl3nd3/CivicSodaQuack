@@ -141,25 +141,6 @@ func RenderLimits(w io.Writer, r *Report, opts RenderOptions) {
 	}
 }
 
-// Summary is the one-line form, for a listing where a full block will not fit.
-func (r *Report) Summary() string {
-	if r == nil || !r.Assessed {
-		return "confidence: not assessed"
-	}
-	out := fmt.Sprintf("confidence %d%% (%s)", r.Score, r.Band)
-	switch n := len(r.Problems()); n {
-	case 0:
-	case 1:
-		out += ", 1 caution"
-	default:
-		out += fmt.Sprintf(", %d cautions", n)
-	}
-	if r.Coverage < 100 {
-		out += fmt.Sprintf(", %d%% coverage", r.Coverage)
-	}
-	return out
-}
-
 // wrapText breaks s into lines of at most width characters on word boundaries.
 func wrapText(s string, width int) []string {
 	fields := strings.Fields(s)
