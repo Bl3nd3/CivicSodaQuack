@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomantra/CivicSodaQuack/internal/duckdb"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
 
@@ -101,7 +102,11 @@ func (s *Session) planPerCityUnion(m *modes.Mode, q modes.Query,
 	plan := &Plan{}
 	var parts []string
 	for i, b := range bindings {
-		if ok, why := m.Comparable(q, b); !ok {
+		// Presence, not just the binding: a concept can be bound and never
+		// synced, and without this the whole comparison dies on a binder error
+		// naming one city's missing table.
+		have := s.tablePresence(aliases[i])
+		if ok, why := m.ComparableWith(q, b, have); !ok {
 			plan.Excluded = append(plan.Excluded, Exclusion{City: b.City, Reason: why})
 			continue
 		}
@@ -282,4 +287,16 @@ func (e *NotSyncedError) FixCommand() string {
 	}
 	return fmt.Sprintf("csq modes init %s --portal %s --output %s.yaml && csq sync --config %s.yaml",
 		e.Mode, p, e.Mode, e.Mode)
+}
+
+// tablePresence returns a lookup for whether one attached portal holds a table
+// with rows. A failure to inspect is reported as "present" so an inspection
+// problem cannot masquerade as missing data — the query then fails loudly
+// instead of quietly excluding a city that was fine.
+func (s *Session) tablePresence(alias string) modes.TableAvailable {
+	counts, err := duckdb.MainTableRows(s.host, alias)
+	if err != nil {
+		return nil
+	}
+	return func(table string) bool { return counts[table] > 0 }
 }

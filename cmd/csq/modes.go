@@ -14,6 +14,7 @@ import (
 
 	_ "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/neomantra/CivicSodaQuack/internal/duckdb"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
 
@@ -333,7 +334,7 @@ func runModeQueries(args []string) error {
 		var expanded string
 		switch {
 		case m.MultiPortal && len(m.Concepts) > 0:
-			expanded, err = buildPerCityUnion(m, q, aliases, bindings, quiet)
+			expanded, err = buildPerCityUnion(host, m, q, aliases, bindings, quiet)
 			if err == errNoComparableCity {
 				continue
 			}
@@ -607,13 +608,16 @@ var errNoComparableCity = errors.New("no comparable city")
 // reporting is the point: silently dropping a city would make absent data look
 // like a good result, which for a crime or service comparison is the most
 // consequential way this tool could mislead someone.
-func buildPerCityUnion(m *modes.Mode, q modes.Query, aliases []string,
+func buildPerCityUnion(host *sql.DB, m *modes.Mode, q modes.Query, aliases []string,
 	bindings []*modes.Binding, quiet bool) (string, error) {
 
 	var parts []string
 	var excluded []string
 	for i, b := range bindings {
-		if ok, why := m.Comparable(q, b); !ok {
+		// Presence, not just the binding: a concept can be bound and never
+		// synced, and without this the whole comparison dies on a binder error
+		// naming one city's missing table rather than answering for the rest.
+		if ok, why := m.ComparableWith(q, b, tablePresence(host, aliases[i])); !ok {
 			excluded = append(excluded, fmt.Sprintf("%s (%s)", b.City, why))
 			continue
 		}
@@ -641,4 +645,15 @@ func buildPerCityUnion(m *modes.Mode, q modes.Query, aliases []string,
 		fmt.Printf("  note: only one city qualifies, so this is not a comparison.\n\n")
 	}
 	return strings.Join(parts, "\nUNION ALL\n"), nil
+}
+
+// tablePresence reports whether one attached portal holds a table with rows.
+// A failure to inspect yields nil, which ComparableWith treats as "do not
+// exclude" — an inspection problem must not masquerade as missing data.
+func tablePresence(host *sql.DB, alias string) modes.TableAvailable {
+	counts, err := duckdb.MainTableRows(host, alias)
+	if err != nil {
+		return nil
+	}
+	return func(table string) bool { return counts[table] > 0 }
 }

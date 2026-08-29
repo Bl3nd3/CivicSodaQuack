@@ -287,6 +287,45 @@ func (m *Mode) Comparable(q Query, b *Binding) (bool, string) {
 	return true, ""
 }
 
+// TableAvailable reports whether a portal's local table exists and holds rows.
+type TableAvailable func(table string) bool
+
+// ComparableWith is Comparable plus a check that the bound tables are actually
+// present locally.
+//
+// Comparable alone answers "can this city answer this question in principle?" —
+// it reads the binding, which describes what the portal publishes. That is not
+// the same as what you hold. A concept can be bound and its table never synced,
+// and then a cross-city query dies on a DuckDB binder error naming a missing
+// table, taking every other city's answer down with it.
+//
+// The distinction matters because the two have different remedies and neither
+// should be reported as the other: a city that does not publish an indicator
+// will never have it, while a city that has not synced one is a command away
+// from it. Both must be excluded by name rather than shown as zero.
+func (m *Mode) ComparableWith(q Query, b *Binding, have TableAvailable) (bool, string) {
+	if ok, why := m.Comparable(q, b); !ok {
+		return false, why
+	}
+	if have == nil {
+		return true, ""
+	}
+	var missing []string
+	for _, name := range conceptRefs(q.SQL) {
+		bd, ok := b.Concepts[name]
+		if !ok {
+			continue
+		}
+		if !have(bd.Table) {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return false, "has not synced " + strings.Join(missing, ", ") + " yet"
+	}
+	return true, ""
+}
+
 // missingColumns lists concept columns this query reads that the portal does
 // not provide. Only optional columns can be missing — a binding lacking a
 // required column is a broken binding, caught at load time.

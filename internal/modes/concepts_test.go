@@ -134,3 +134,89 @@ func TestBindingMayMapAnExpression(t *testing.T) {
 		t.Errorf("issuance_date mapped as a bare column; it is text, not a date: %s", view)
 	}
 }
+
+// A concept can be bound and its table never synced. Without a presence check
+// a cross-city query dies on a DuckDB binder error naming the missing table,
+// taking every other city's answer down with it — so the city that has the data
+// gets no answer because of the city that does not.
+func TestComparableWith_ExcludesUnsyncedTables(t *testing.T) {
+	m, err := Lookup("ranking")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := LookupBinding("ranking", "data.cityofnewyork.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := m.Query("311-load")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Bound, and in principle answerable.
+	if ok, why := m.Comparable(*q, b); !ok {
+		t.Fatalf("expected the binding alone to look answerable, got %q", why)
+	}
+
+	// But the table is not held locally.
+	none := func(string) bool { return false }
+	ok, why := m.ComparableWith(*q, b, none)
+	if ok {
+		t.Fatal("a city whose table is absent must be excluded")
+	}
+	if !strings.Contains(why, "has not synced") {
+		t.Errorf("reason = %q; must say the data is unsynced, not unpublished", why)
+	}
+}
+
+// The two exclusion reasons have different remedies and must stay
+// distinguishable: a city that does not publish an indicator will never have
+// it, while a city that has not synced one is a command away from it.
+func TestComparableWith_KeepsUnpublishedDistinctFromUnsynced(t *testing.T) {
+	m, _ := Lookup("ranking")
+	b, err := LookupBinding("ranking", "data.cityofnewyork.us")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := m.Query("arrest-share")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Every table present; NYC still cannot answer, because it records no
+	// arrest flag. The reason must reflect that, not the presence check.
+	all := func(string) bool { return true }
+	ok, why := m.ComparableWith(*q, b, all)
+	if ok {
+		t.Fatal("NYC publishes no arrest flag; it must be excluded")
+	}
+	if strings.Contains(why, "has not synced") {
+		t.Errorf("reason = %q; an unpublished column must not read as unsynced", why)
+	}
+	if !strings.Contains(why, "does not record") {
+		t.Errorf("reason = %q, want the unpublished-column wording", why)
+	}
+}
+
+// A city holding everything the query needs is comparable, and a nil lookup
+// means "presence unknown" rather than "absent" — an inspection failure must
+// not masquerade as missing data and silently drop a city.
+func TestComparableWith_PresentAndUnknown(t *testing.T) {
+	m, _ := Lookup("ranking")
+	b, err := LookupBinding("ranking", "data.cityofchicago.org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, err := m.Query("311-load")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	all := func(string) bool { return true }
+	if ok, why := m.ComparableWith(*q, b, all); !ok {
+		t.Errorf("Chicago holds 311; got excluded with %q", why)
+	}
+	if ok, why := m.ComparableWith(*q, b, nil); !ok {
+		t.Errorf("a nil lookup must not exclude anyone; got %q", why)
+	}
+}

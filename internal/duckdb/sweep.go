@@ -3,7 +3,9 @@
 package duckdb
 
 import (
+	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -102,3 +104,36 @@ func (w *Writer) SweepAbandoned(now time.Time) (SweepResult, error) {
 	}
 	return res, nil
 }
+
+// MainTableRows returns table name → row count for one attached database's
+// main schema.
+//
+// Shared rather than reimplemented per caller: both the CLI and the web server
+// need it to tell "this city cannot answer" from "this city has not synced
+// yet", and those two must never disagree about which is which.
+//
+// estimated_size is exact for a table with no pending changes, which is the
+// case for every database this is asked about — they are attached read-only.
+func MainTableRows(db *sql.DB, database string) (map[string]int64, error) {
+	rows, err := db.Query(fmt.Sprintf(
+		`SELECT table_name, coalesce(estimated_size, 0) FROM duckdb_tables()
+		  WHERE database_name = '%s' AND schema_name = 'main'`,
+		escapeLiteral(database)))
+	if err != nil {
+		return nil, fmt.Errorf("inventory %s: %w", database, err)
+	}
+	defer rows.Close()
+
+	out := map[string]int64{}
+	for rows.Next() {
+		var name string
+		var n int64
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out[name] = n
+	}
+	return out, rows.Err()
+}
+
+func escapeLiteral(s string) string { return strings.ReplaceAll(s, "'", "''") }
