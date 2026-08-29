@@ -206,6 +206,10 @@ type DatasetReport struct {
 
 	UpstreamUpdated *time.Time `json:"upstream_updated,omitempty"`
 	LastSynced      *time.Time `json:"last_synced,omitempty"`
+	// AgeDays is days since UpstreamUpdated, measured against the assessment's
+	// clock rather than recomputed on read. Nil when the portal reports no
+	// timestamp.
+	AgeDays *int `json:"age_days,omitempty"`
 
 	Signals []Signal `json:"signals"`
 	Score   int      `json:"score"`
@@ -214,11 +218,42 @@ type DatasetReport struct {
 
 // FreshnessDays returns whole days since the portal last changed this
 // dataset's data, and whether that is known at all.
+//
+// The age is the one computed during assessment, not one recomputed now: the
+// signal line and this must not disagree, and they would for any caller that
+// pins the clock — a report could otherwise read "updated 3 days ago" above
+// "Source freshness: 700 days".
 func (d DatasetReport) FreshnessDays() (int, bool) {
-	if d.UpstreamUpdated == nil {
+	if d.AgeDays == nil {
 		return 0, false
 	}
-	return int(time.Since(*d.UpstreamUpdated).Hours() / 24), true
+	return *d.AgeDays, true
+}
+
+// Clone returns a deep copy, so a cached report can be handed to a caller that
+// will append to it.
+//
+// Reports are memoised per query, and a caller may add a result-level signal
+// (concentration) to what it receives. Without this, that append lands on the
+// shared cached value: the signal accumulates on every run, and two concurrent
+// HTTP handlers mutate and sort one slice while a third marshals it.
+func (r *Report) Clone() *Report {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	out.Signals = append([]Signal(nil), r.Signals...)
+	out.Limits = append([]string(nil), r.Limits...)
+	out.Datasets = make([]DatasetReport, len(r.Datasets))
+	for i, d := range r.Datasets {
+		d.Signals = append([]Signal(nil), d.Signals...)
+		out.Datasets[i] = d
+	}
+	if r.FreshnessDays != nil {
+		n := *r.FreshnessDays
+		out.FreshnessDays = &n
+	}
+	return &out
 }
 
 // Report is the assessment for one query.

@@ -40,15 +40,15 @@ func TargetsFor(m *modes.Mode, q modes.Query, alias string, b *modes.Binding) []
 			Concept: name, ExpectedRows: bd.Rows,
 			View: c.CanonicalView(alias+".main."+bd.Table, bd),
 		}
-		// Required columns are read by definition; optional ones only when
-		// this query mentions them. Profiling a column the query ignores would
-		// let an unrelated gap depress the score for an answer it cannot reach.
-		for _, col := range c.Required {
-			if _, avail := bd.ColumnFor(col); avail {
-				t.Columns = append(t.Columns, col)
-			}
-		}
-		for _, col := range c.Optional {
+		// Only the columns this query names, required or optional alike.
+		//
+		// "Required" is a property of the concept, not of the query: a concept
+		// requires a column so that *some* of its queries can rely on it, and
+		// most queries read a subset. Profiling the rest would let an unrelated
+		// gap depress the score for an answer that cannot reach it — top-vendors
+		// selects a vendor and an amount, and has no business being marked down
+		// because a department column it never opens is patchy.
+		for _, col := range append(append([]string{}, c.Required...), c.Optional...) {
 			if !modes.QueryReadsColumn(q.SQL, col) {
 				continue
 			}

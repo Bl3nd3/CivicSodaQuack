@@ -378,28 +378,52 @@ func runModeQueries(args []string) error {
 			fmt.Fprintln(os.Stderr)
 			continue
 		}
-		printConfidence(host, m, q, binding, aliases, cols, rows, quiet)
+		printConfidence(host, m, q, bindings, aliases, cols, rows, quiet)
 		fmt.Println()
 	}
 	return nil
 }
 
-// printConfidence renders the data-fitness block under a query's results.
+// printConfidence renders the evidence block under a query's results.
 //
 // It runs after the table is on screen and never returns an error: an
-// assessment that cannot be produced must not be able to retract an answer the
-// user already has. A mode with no concepts reads csq's own bookkeeping and has
-// no synced dataset to profile, so it gets no block at all.
-func printConfidence(host *sql.DB, m *modes.Mode, q modes.Query, binding *modes.Binding,
+// assessment that cannot be produced must not retract an answer the user
+// already has. A mode with no concepts reads csq's own bookkeeping and has no
+// synced dataset to profile, so it gets no block at all.
+func printConfidence(host *sql.DB, m *modes.Mode, q modes.Query, bindings []*modes.Binding,
 	aliases []string, cols []string, rows [][]any, quiet bool) {
 
-	if quiet || binding == nil || len(aliases) == 0 {
+	if quiet || len(aliases) == 0 {
 		return
 	}
-	targets := confidence.TargetsFor(m, q, aliases[0], binding)
+
+	// Every city that contributed rows, not just the first. The table above is
+	// a UNION ALL across all comparable cities, and scoring one of them while
+	// presenting it as the confidence for the whole answer would describe rows
+	// that were never examined.
+	var targets []confidence.Target
+	for i, b := range bindings {
+		if b == nil || i >= len(aliases) {
+			continue
+		}
+		if m.MultiPortal {
+			if ok, _ := m.Comparable(q, b); !ok {
+				continue
+			}
+		} else {
+			if i > 0 {
+				break // a single-portal mode runs its first binding only
+			}
+			if ok, _ := m.Runnable(q, b); !ok {
+				continue
+			}
+		}
+		targets = append(targets, confidence.TargetsFor(m, q, aliases[i], b)...)
+	}
 	if len(targets) == 0 {
 		return
 	}
+
 	rep := confidence.Assess(context.Background(), host, targets, confidence.Options{})
 	if !rep.Assessed {
 		return
