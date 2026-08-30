@@ -1,89 +1,123 @@
-Here's a polished, comprehensive, ready-to-use **system / project prompt** that captures everything we've discussed about **CivicSodaQuack**. You can use this directly as a GitHub repo README intro, a Claude/Grok coding prompt, or an internal project brief.
+# CivicSodaQuack — notes for agents working on this repo
 
-### CivicSodaQuack Project Prompt
+**csq** turns any Socrata Open Data portal into a local DuckDB file, then puts a
+CLI, an MCP server, and a browser UI over it. Go, one binary, no service to run.
 
-**Project Name:** CivicSodaQuack (csq)  
-**One-liner:** Turn any Socrata Open Data API portal into a fast, local, queryable DuckDB + MCP surface for AI agents.
+This file is orientation for someone editing the code. `README.md` is the user
+documentation and is the more complete reference for behaviour; when the two
+disagree, the README and the code win.
 
-**Mission**  
-Build a lightweight, opinionated Go tool that lets anyone (especially AI agents) discover, sync, and analytically query thousands of public datasets from 40+ Socrata-powered government portals (NYC, Chicago, Seattle, Connecticut, data.gov sections, etc.) without fighting SoQL limits, rate limits, or messy JSON.
-
-The end result: one CLI + one MCP server that gives agents powerful local SQL (with spatial extensions) over materialized civic data.
-
-**Core Architecture (inspired by dank-* tools + dbn-go-mcp-data patterns)**
+## Layout
 
 ```
-SODA portals (data.nyc.gov, data.cityofchicago.org, ...)
-        ↓ (catalog + paginated JSON with $order, $offset, app token)
-Generic Extractor CLI (runtime schema inference + YAML overrides)
-        ↓
-Per-portal DuckDB files (recommended: one .duckdb per portal)
-        ↓
-MCP Server (list_datasets, describe_dataset, search_datasets, query_sql)
+cmd/csq/           every subcommand, one file each (sync.go, modes.go, web.go, ...)
+internal/
+  socrata/         SODA client: catalog, paginated fetch, app tokens, 429 backoff
+  sync/            incremental materialisation into DuckDB, high-water marks
+  config/          per-portal YAML (dataset list, overrides, cleaning rules)
+  duckdb/          connection helpers and the `_csq` bookkeeping schema
+  portallock/      advisory <dbpath>.lock (flock) shared by every subcommand
+  modes/           curated analysis profiles: concepts, bindings, queries, caveats
+  analysis/        runs mode queries headlessly, returns structured results
+  confidence/      scores how far the data behind an answer can be trusted
+  web/             browser UI, CSV/JSON export, standalone HTML reports
+  mcpserver/       MCP tools over the attached portals
+  snapshot/        publish and fetch prebuilt .duckdb tarballs
 ```
 
-**Key Design Principles**
-- **Catalog-driven**: Automatically discover all datasets via `/api/catalog/v1` + rich metadata.
-- **Generic + Escapable**: Runtime schema inference for most datasets. YAML overrides only for exceptions (column renames, cleaning rules, incremental keys, skipped fields, custom geo handling).
-- **Incremental-first**: Use `$order=:updated_at` + high-water-mark tracking per dataset for efficient daily/ hourly syncs (critical for million-row datasets like 311, violations, crimes).
-- **Smart Geo Handling**:
-  - `point` / `location` → flatten to `lon`, `lat` + keep raw GeoJSON
-  - `polygon` / `multipolygon` → DuckDB `GEOMETRY` type via spatial extension
-- **Minimal Cleaning by Default**: Trim whitespace, empty strings → NULL. Opt-in cleaners via overrides.
-- **Per-portal DuckDB files**: Smaller, parallelizable syncs, easier distribution/snapshots. (Alternative: single DB with schemas — decide early.)
-- **MCP-native**: Expose clean agent-friendly tools. Draw heavy inspiration from `dbn-go-mcp-data` (discovery tools, cache/query layer, STDIO + SSE transport, read-only mode).
-- **Snapshot Publishing** (future): Pre-built, periodically refreshed `.duckdb` tarballs so agents can just download and attach.
+The CLI is the complete interface and stays that way. Anything the web UI or
+MCP server can do is reachable from a subcommand.
 
-**MCP Tools (target set)**
-- `list_datasets(portal?)` — cached catalog
-- `describe_dataset(id)` — schema, description, sample rows, last synced
-- `search_datasets(portal?, query)`
-- `query_sql(sql)` — runs against attached DuckDB files (full DuckDB power + spatial)
+## The two indirections worth understanding first
 
-**Stack**
-- Go (matches your existing toolchain: `dank-extract`, `dank-mcp`, `dbn-go-mcp-data`)
-- `go-duckdb` + spatial extension
-- MCP Go SDK
-- YAML for per-dataset overrides
-- App token support per-portal + 429 backoff
+**Concepts and bindings** (`internal/modes/concepts.go`). A mode names the
+tables it needs by *what they must contain*, not by dataset ID: "contracts with
+a vendor and an award amount" is a `Concept`, and `rsxa-ify5` is one portal's
+answer to it. A `Binding` maps a city's datasets and column names onto those
+concepts, so queries are written once against canonical names and referenced in
+SQL as `{{c:contracts}}`.
 
-**Phase Plan**
-- **Phase 0**: Generic SODA extractor CLI + schema inference → single portal → one DuckDB
-- **Phase 1**: Catalog-driven bulk sync + overrides config
-- **Phase 2**: Incremental sync via high-water marks
-- **Phase 3**: Full MCP server (attach multiple per-portal DuckDBs)
-- **Phase 4**: Snapshot publishing (like dank-data)
+Two consequences that catch people out:
 
-**Design Decisions to Resolve Early**
-- One DuckDB per portal vs. one big DB with schemas
-- Default cleaning policy vs. opt-in
-- How aggressively to cache catalog + metadata inside each DuckDB
-- Unified MCP view (auto-ATTACH all portals under one server)
+- A binding's `Columns` value may be **any SQL expression**, not just a column
+  name — `CanonicalView` emits it verbatim as `<expr> AS <canonical>`. NYC
+  publishes permit dates as `MM/DD/YYYY` text, and the binding maps them through
+  `try_strptime` so no query has to know that.
+- When `Columns` is non-empty it is **authoritative**. A concept column missing
+  from it is unavailable on that portal, and a query needing it excludes the
+  city with a stated reason. Treating a missing column as merely unmapped would
+  let a NULL read as a real value, which for a rate is indistinguishable from a
+  good answer.
 
-**What Makes This Unique**
-No existing tool combines:
-- Automatic catalog discovery across any Socrata portal
-- Runtime schema inference + targeted YAML overrides
-- Thoughtful civic/geo mapping
-- Incremental materialization into DuckDB
-- A clean MCP agent interface on top
+Adding a city means adding a binding. Adding a mode means appending to the
+registry in `internal/modes/` (`var registry` in `modes.go`). Neither touches
+the CLI.
 
-Closest pieces (ingestr, dlt + Socrata, OpenGov MCP servers, Mage/Polars examples, your own `dbn-go-mcp-data`) each solve only part of the puzzle. CivicSodaQuack glues them into something production-ready and agent-native.
+**Confidence** (`internal/confidence/`). Every mode query carries a score: the
+share of the records the query meant to consult that were actually there and
+usable. For each dataset it reads, three counts — `E` rows the portal holds,
+`H` rows held locally, `U` rows where every column the query reads is usable:
 
-**Success Looks Like**
-A developer or AI agent can run:
-```bash
-civicsodaquack sync data.nyc.gov --token=xxx
-civicsodaquack serve
 ```
-…and immediately start asking powerful analytical + spatial questions over NYC open data via MCP.
+completeness = min(1, H/E)     usability = U/H     r = completeness × usability     R = ∏ r
+```
 
----
+Every term is a count over a count. There are no weights, severity
+coefficients, or saturation points anywhere in the arithmetic, and that is
+deliberate — an earlier version had about twenty tuned constants, and six of its
+eight checks turned out to be the same measurement (rows that do not survive).
+**If you find yourself adding a constant to this package, that is the signal to
+stop and re-derive.** The only permitted constants are presentational (the band
+names) or definitional (DuckDB's minimum timestamp).
 
-You can copy-paste this directly. Want me to adjust it for:
-- A shorter GitHub README version?
-- A detailed coding prompt for implementing Phase 0?
-- Adding specific YAML override examples?
-- Or include more patterns from `dbn-go-mcp-data` (e.g., cache structure, tool registration style)?
+Freshness and sync status are *reported beside* R, never folded into it:
+staleness removes no rows, so it has no reading as evidence loss. `U` is
+measured with one joint SQL filter, not per-column rates multiplied — nulls in
+civic data cluster hard, and assuming independence roughly halves the apparent
+survival on real Chicago data.
 
-Just say the word and I’ll refine it. 🦆
+## Conventions
+
+- **Interpretation caveats are structural.** Every mode must declare
+  `Caveats`; `modes_test.go` fails the build otherwise. Contract concentration
+  is often legitimate and an unsustained complaint is not a false one — a tool
+  reporting on procurement and policing says so where the numbers are.
+- **A score never travels alone.** Renderers emit the score, the counts that
+  produced it, and the limits together. There is deliberately no code path that
+  emits a bare percentage.
+- **"Could not measure" and "measured zero" are different** and must stay
+  different everywhere. An unassessed report renders as "not assessed", never
+  as 0%.
+- Errors say what to do next. Assessment failures never retract an answer the
+  user already has.
+
+## Working on it
+
+```
+task build        # or: go build ./cmd/csq
+task test         # go test ./...
+task vet
+gofmt -l .
+```
+
+CI is `.github/workflows/ci.yml` with `.golangci.yml`. Run `go test ./...` and
+`gofmt -l .` before pushing; `go test -race ./internal/analysis/` is worth it if
+you touch the session cache, which is shared across concurrent HTTP handlers.
+
+## Gotchas
+
+- **DuckDB's file lock is cross-process and mutually exclusive.** A `READ_ONLY`
+  attach does *not* let you read a database another process is syncing, and a
+  sync cannot open a file the web UI is holding. Read-only attach buys
+  coexistence with other *readers* only. Within one process both are fine,
+  which is why `csq web`'s own download works without detaching.
+- **`_csq.catalog.row_count` is effectively always NULL.** Use
+  `BoundDataset.Rows` as the reference count.
+- **A `READ_ONLY` attach is a snapshot** — DuckDB binds the catalog at attach
+  time, so data written afterwards is invisible until you `DETACH` and
+  re-attach (`analysis.Session.Refresh`).
+- **A recent timestamp does not mean recent data.** `updated_at` carries the
+  portal's `data_updated_at`, which still moves when a portal republishes
+  unchanged rows. The Cook County State's Attorney datasets are the live case:
+  abandoned in 2024, still reporting a 2026 `updated_at`.
+- Advisory locking is per **dbpath**, not per portal.
