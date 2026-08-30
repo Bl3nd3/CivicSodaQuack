@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/neomantra/CivicSodaQuack/internal/analysis"
+	"github.com/neomantra/CivicSodaQuack/internal/confidence"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
 
@@ -28,6 +29,11 @@ type reportSection struct {
 	Truncated      bool
 	// Skipped explains why a query produced nothing, when it did.
 	Skipped string
+	// Confidence is the data-fitness assessment behind this section. A report
+	// is the copy of these numbers most likely to be read by someone who was
+	// not there when they were produced, which is exactly when the qualifier
+	// has to travel with them.
+	Confidence *confidence.Report
 }
 
 type reportData struct {
@@ -95,6 +101,7 @@ func (s *Server) section(ctx context.Context, m *modes.Mode, q modes.Query) repo
 	}
 
 	sec.Columns = res.Columns
+	sec.Confidence = res.Confidence
 	sec.Excluded = res.Excluded
 	sec.NotAComparison = res.NotAComparison
 	sec.Truncated = res.Truncated

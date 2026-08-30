@@ -44,6 +44,19 @@ type Query struct {
 	Name string // slug, unique within the mode
 	Desc string // what the result shows
 	SQL  string // may contain the Placeholder* tokens
+
+	// Entity and Measure name the result columns that make a concentration
+	// reading possible: what each row is about, and the number a reader will
+	// quote. When both are set, the confidence block reports how much of the
+	// returned total sits in the single largest row — the difference between
+	// "vendors were paid $200M" and "one vendor took $122M of it".
+	//
+	// They are declared rather than inferred because inferring them means
+	// guessing which numeric column is a total, and a share computed over the
+	// wrong column is a confidently wrong percentage. A query that leaves them
+	// empty simply gets no concentration line.
+	Entity  string
+	Measure string
 }
 
 // Mode is a curated analysis profile.

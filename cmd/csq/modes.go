@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	_ "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/neomantra/CivicSodaQuack/internal/confidence"
 	"github.com/neomantra/CivicSodaQuack/internal/duckdb"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
@@ -262,9 +264,11 @@ func runModeQueries(args []string) error {
 			m.Name, len(dbPaths))
 	}
 
-	// Attach every portal READ_ONLY. Read-only attach lets these queries run
-	// alongside an MCP server or a sync holding the same file, and nothing here
-	// ever writes.
+	// Attach every portal READ_ONLY: nothing here ever writes, and other
+	// readers of the same file are free to run alongside. This does not buy
+	// coexistence with a writer — DuckDB's file lock is mutually exclusive
+	// between processes in either order, so a concurrent csq sync fails the
+	// attach below rather than yielding a stale read.
 	host, err := sql.Open("duckdb", ":memory:")
 	if err != nil {
 		return fmt.Errorf("open host: %w", err)
@@ -363,7 +367,8 @@ func runModeQueries(args []string) error {
 			}
 			fmt.Println()
 		}
-		if err := runAndPrint(host, expanded); err != nil {
+		cols, rows, err := runAndPrint(host, expanded)
+		if err != nil {
 			// A missing table means the mode's datasets were never synced. Say
 			// so usefully rather than surfacing a raw binder error.
 			fmt.Fprintf(os.Stderr, "  query %s failed: %v\n", q.Name, err)
@@ -376,23 +381,79 @@ func runModeQueries(args []string) error {
 			fmt.Fprintln(os.Stderr)
 			continue
 		}
+		printConfidence(host, m, q, bindings, aliases, cols, rows, quiet)
 		fmt.Println()
 	}
 	return nil
 }
 
-// runAndPrint executes one query and renders the result as an aligned table.
-func runAndPrint(db *sql.DB, query string) error {
+// printConfidence renders the evidence block under a query's results.
+//
+// It runs after the table is on screen and never returns an error: an
+// assessment that cannot be produced must not retract an answer the user
+// already has. A mode with no concepts reads csq's own bookkeeping and has no
+// synced dataset to profile, so it gets no block at all.
+func printConfidence(host *sql.DB, m *modes.Mode, q modes.Query, bindings []*modes.Binding,
+	aliases []string, cols []string, rows [][]any, quiet bool) {
+
+	if quiet || len(aliases) == 0 {
+		return
+	}
+
+	// Every city that contributed rows, not just the first. The table above is
+	// a UNION ALL across all comparable cities, and scoring one of them while
+	// presenting it as the confidence for the whole answer would describe rows
+	// that were never examined.
+	var targets []confidence.Target
+	for i, b := range bindings {
+		if b == nil || i >= len(aliases) {
+			continue
+		}
+		if m.MultiPortal {
+			if ok, _ := m.Comparable(q, b); !ok {
+				continue
+			}
+		} else {
+			if i > 0 {
+				break // a single-portal mode runs its first binding only
+			}
+			if ok, _ := m.Runnable(q, b); !ok {
+				continue
+			}
+		}
+		targets = append(targets, confidence.TargetsFor(m, q, aliases[i], b)...)
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	rep := confidence.Assess(context.Background(), host, targets, confidence.Options{})
+	if !rep.Assessed {
+		return
+	}
+	confidence.AddConcentration(rep, q.Entity, q.Measure, cols, rows)
+
+	fmt.Println()
+	confidence.RenderText(os.Stdout, rep, confidence.RenderOptions{
+		ShowDetail: true, Prefix: "  ",
+	})
+}
+
+// runAndPrint executes one query, renders it as an aligned table, and returns
+// the columns and rows it printed so a caller can read a concentration signal
+// off the same rows the user is looking at.
+func runAndPrint(db *sql.DB, query string) ([]string, [][]any, error) {
 	rows, err := db.Query(query)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
+	var out [][]any
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, strings.Join(cols, "\t"))
@@ -410,23 +471,24 @@ func runAndPrint(db *sql.DB, query string) error {
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return err
+			return nil, nil, err
 		}
 		cells := make([]string, len(cols))
 		for i, v := range vals {
 			cells[i] = renderCell(v)
 		}
 		fmt.Fprintln(tw, strings.Join(cells, "\t"))
+		out = append(out, vals)
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	if err := tw.Flush(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	fmt.Printf("(%d rows)\n", n)
-	return nil
+	return cols, out, nil
 }
 
 func renderCell(v any) string {

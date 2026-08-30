@@ -84,6 +84,28 @@ h2 .slug { color: var(--text-muted); font-weight: 400; font-size: 14px; font-fam
 }
 .callout strong { display: block; margin-bottom: 4px; }
 .callout ul { margin: 6px 0 0; padding-left: 20px; }
+/* Confidence sits above the numbers so it reads as a qualifier, not a
+   footnote. No bar here: a printed report is the one place a decorative
+   element cannot be relied on, so every value is text. */
+.confidence { border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); padding: 16px 20px; margin: 0 0 20px; }
+.conf-head { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.conf-score { font-size: 24px; font-weight: 700; line-height: 1; }
+.conf-score.high { color: #008300; }
+.conf-score.moderate { color: #a56800; }
+.conf-score.low, .conf-score.insufficient { color: #c2410c; }
+.conf-what { display: flex; flex-direction: column; gap: 2px; }
+.conf-what b { text-transform: capitalize; }
+.conf-fresh { margin-left: auto; color: var(--text-muted); font-size: 13px; }
+.conf-signals { list-style: none; margin: 0; padding: 0; }
+.conf-sig { display: flex; gap: 8px; font-size: 14px; color: var(--text-secondary); margin-bottom: 6px; }
+.conf-mark { flex: none; width: 1em; font-weight: 700; }
+.conf-sig.pass .conf-mark { color: #008300; }
+.conf-sig.warn .conf-mark { color: #a56800; }
+.conf-sig.fail .conf-mark { color: #c2410c; }
+.conf-sig.fail { color: var(--text-primary); }
+.conf-detail { display: block; color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+.conf-limits { margin: 12px 0 0; padding-left: 20px; color: var(--text-muted); font-size: 13px; }
+.conf-limits li { margin-bottom: 5px; }
 .caveats { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 20px 24px; margin: 24px 0 0; }
 .caveats h3 { margin: 0 0 12px; font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
 .caveats li { margin-bottom: 10px; color: var(--text-secondary); font-size: 14px; }
@@ -146,6 +168,23 @@ footer code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   <div class="callout"><strong>Not a comparison</strong>
     Only one city qualified, so this is a single-city figure rather than a comparison.</div>
   {{end}}
+
+  {{with .Confidence}}{{if .Assessed}}{{$multi := gt (len .Datasets) 1}}
+  <div class="confidence">
+    <div class="conf-head">
+      <span class="conf-score {{.Band}}">{{.Score}}%</span>
+      <span class="conf-what"><b>Confidence: {{.Band}}</b>
+        <span class="muted">The share of records this query reads that are present and usable.{{if lt .Coverage 100}} Only {{.Coverage}}% of checks could be run; the score covers those.{{end}}</span></span>
+      {{with .FreshnessLine}}<span class="conf-fresh">{{.}}</span>{{end}}
+    </div>
+    <ul class="conf-signals">
+      {{range .Confirmations}}<li class="conf-sig pass"><span class="conf-mark">&#10003;</span> {{if and $multi .Dataset}}{{.Dataset}}: {{end}}{{.Label}}</li>{{end}}
+      {{range .Unmeasured}}<li class="conf-sig unknown"><span class="conf-mark">&middot;</span> {{if and $multi .Dataset}}{{.Dataset}}: {{end}}{{.Label}}</li>{{end}}
+      {{range .Problems}}<li class="conf-sig {{.Level}}"><span class="conf-mark">{{if eq .Level "fail"}}&#10007;{{else}}&#9888;{{end}}</span> {{if and $multi .Dataset}}{{.Dataset}}: {{end}}{{.Label}}{{with .Detail}}<span class="conf-detail">{{.}}</span>{{end}}</li>{{end}}
+    </ul>
+    <ul class="conf-limits">{{range .Limits}}<li>{{.}}</li>{{end}}</ul>
+  </div>
+  {{end}}{{end}}
 
   {{if .Skipped}}
     <p class="skipped">{{.Skipped}}</p>

@@ -71,6 +71,11 @@ type Session struct {
 	// slice has to take a snapshot rather than range over it directly.
 	mu      sync.RWMutex
 	portals []Portal
+
+	// confCache memoises confidence assessments. Profiling is a scan per
+	// dataset, and a page rendering several analyses over the same corpus would
+	// otherwise repeat the same scans for every one of them.
+	confCache confidenceCache
 }
 
 // snapshot returns a copy of the attached portals, safe to range over without
@@ -244,6 +249,8 @@ func (s *Session) Refresh(alias string) error {
 		quoteLiteral(path), alias)); err != nil {
 		return fmt.Errorf("re-attach %s: %w", alias, err)
 	}
+	// New data is precisely what a cached assessment must not hide.
+	s.confCache.invalidate()
 	return nil
 }
 

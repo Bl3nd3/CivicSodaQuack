@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/neomantra/CivicSodaQuack/internal/confidence"
 )
 
 // ExportRowLimit caps an export.
@@ -101,7 +103,32 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	if res.NotAComparison {
 		comment("# only one city qualified, so this is not a comparison")
 	}
-	if len(res.Caveats) > 0 || len(res.Excluded) > 0 {
+	// The confidence block travels with the rows for the same reason the
+	// caveats do. A spreadsheet is where a hedged number most easily loses its
+	// hedge, and "these figures come from a copy holding 54% of the dataset" is
+	// not a footnote a reader can be expected to go back for.
+	if c := res.Confidence; c != nil && c.Assessed {
+		comment(fmt.Sprintf("# confidence: %d%% (%s) — %s",
+			c.Score, c.Band, confidence.Tagline))
+		if c.Coverage < 100 {
+			comment(fmt.Sprintf("#   %d%% of checks could be run; the score covers only those",
+				c.Coverage))
+		}
+		for _, sig := range c.Problems() {
+			comment("#   ! " + sig.Label)
+		}
+		for _, sig := range c.Unmeasured() {
+			comment("#   ? " + sig.Label)
+		}
+		if line := c.FreshnessLine(); line != "" {
+			comment("# " + line)
+		}
+	}
+	// Only when something was actually written above. The confidence block is
+	// skipped for an unassessed report, and a stray empty row is read as the
+	// header by strict CSV parsers, losing the column names.
+	assessed := res.Confidence != nil && res.Confidence.Assessed
+	if len(res.Caveats) > 0 || len(res.Excluded) > 0 || res.NotAComparison || assessed {
 		comment("")
 	}
 

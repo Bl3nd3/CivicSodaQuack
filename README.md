@@ -92,8 +92,16 @@ take the same advisory lock `csq sync` takes, and one runs at a time. Without
 read-only and prints the command instead. `csq web --db new.duckdb --config
 portal.yaml` creates the database if it does not exist yet.
 
-Every database is opened `READ_ONLY` for reading, so this composes with a
-running `csq mcp` or `csq sync` on the same file.
+Every database is opened `READ_ONLY`, so any number of *readers* can share one
+file — this page, a `csq mcp` server, a `csq query` in a terminal. A writer is
+not one of them: DuckDB locks the database file against other processes, so the
+page cannot attach a database that `csq sync` is writing elsewhere, and a sync
+started elsewhere cannot open one this page is holding. The lock is symmetric
+and the loser gets `Could not set lock on file`. Stop the other process first.
+
+The page's own **Download this data** button is unaffected, because that write
+happens inside this process, which already holds the file — the lock excludes
+other processes, not other handles.
 
 #### Share the results
 
@@ -155,7 +163,7 @@ For a mode with datasets, generate a config and sync it, then run the queries:
 
 Running the statements that produces against the Cook County corpus reports a `sentence_date` reaching the year **2921** and an `arrest_date` starting in **1915** — the kind of upstream defect that silently ruins a time series. Read generated SQL before running it, as you would any generated code.
 
-`modes run` attaches every portal `READ_ONLY`, so it composes with a running `csq mcp` or `csq sync` holding the same file instead of contending for the write lock.
+`modes run` attaches every portal `READ_ONLY`, so it can share a file with other readers — a `csq mcp` server, another `modes run`. It cannot read a database some other process is *writing*: DuckDB's file lock excludes a reader and a writer from each other in either order, so a running `csq sync` will fail this command with `Could not set lock on file`, and vice versa. Read-only attach avoids contending with other readers, not with a sync.
 
 Each mode carries interpretation caveats, printed by `modes show`, printed above `modes run` output, and embedded as comments in the YAML that `modes init` writes. They are a structural requirement — a test fails the build if a mode declares none. Contract concentration is frequently legitimate (specialised work may have one qualified bidder), and an unsustained complaint is not a false one; a tool reporting on procurement and policing should say so where the numbers are. Three scope limits worth stating up front:
 
@@ -164,6 +172,77 @@ Each mode carries interpretation caveats, printed by `modes show`, printed above
 - **A recent timestamp does not mean recent data.** `research --query provenance` reports when *csq* last pulled a dataset, which says nothing about the city. `_csq.catalog.updated_at` is better — it carries the portal's `data_updated_at`, ignoring metadata edits so that rewriting a description no longer makes a stale dataset look current — but it still moves when a portal republishes unchanged rows. The five Cook County State's Attorney datasets in `datacatalog.cookcountyil.gov.yaml` are the live example: abandoned by the SAO on 2024-12-30 with coverage ending 2024-11-30, yet `updated_at` reads 2026-04-02. Read the dataset's own description before describing anything as current; no timestamp on either side is sufficient.
 
 Adding a mode means appending to the registry in `internal/modes/`, not touching the CLI.
+
+### Confidence scores
+
+Every mode query carries a **confidence score**: how far the data behind that particular answer can be trusted. It appears under `modes run`, above the table in the browser, in both export formats, and in the shareable report.
+
+```
+  Confidence: 54% (low) — the share of records this query reads that are
+  present and usable
+
+  ✓ dataset successfully synced on 28 Aug 2026
+      The run recorded writing 5,440,343 rows.
+  ✓ all 2 columns this query reads are populated
+  ✓ local copy is current with the portal
+
+  ⚠ portal has not updated this data in 122 days
+  ✗ 54% of expected rows present
+      4,631,164 rows short of the 10,071,507 reference count.
+
+  Source freshness: 122 days
+```
+
+That is a real assessment of NYC's complaint data, and it is the case the feature exists for: the query returns entirely plausible per-capita crime rates computed over roughly half the dataset, and nothing else on the page would tell you. The 54% is not a rating — it is the fraction 5,440,343 / 10,071,507.
+
+**It measures the evidence, not the truth.** The score is the share of records this query reads that are present and usable. A city that under-reports a category still scores 100%. The number is therefore never rendered alone — the counts that produced it and the limits on reading it are fields on the same response, and no renderer has a path that emits one without the others.
+
+#### The formula
+
+For each dataset a query reads, three counts:
+
+```
+E   rows the portal holds        (the reference count)
+H   rows held locally
+U   rows held in which every column the query reads carries usable
+    information — not null, and for a timestamp, a date that could be real
+```
+
+The dataset's retention is the share of the intended evidence that survives, and the query's score is the product across its datasets:
+
+```
+completeness = min(1, H/E)     did the rows arrive
+usability    = U/H             do they carry what the query reads
+
+r = completeness × usability             R = ∏ r
+```
+
+That is `U/E` whenever the local copy is no larger than the reference count. It parts company with `U/E` only when a dataset has grown since it was mapped: completeness saturates at 1 rather than exceeding it, so surplus rows cannot pay for a defect elsewhere, and the usable share is then measured against what is actually held rather than a stale denominator. Chicago's contracts are the live case — 185,826 held against a 185,699 reference.
+
+**Every term is a count divided by a count.** No weights, no severity coefficients, no saturation points, no thresholds anywhere in the arithmetic — nothing to tune, and therefore nothing to tune wrongly. Two scores are comparable because they are *the same measurement*, not because two tables of constants happened to agree.
+
+R is not an index. It has a plain reading: **the share of the records the query meant to consult that were actually there and usable.** Chicago's `procurement-type` scores 30% because 55,200 of 185,826 contracts carry every column it reads. NYC's `crime-rate` scores 54% because a count from it rests on 5,440,343 of the 10,071,507 records the portal holds. That sentence is the whole interpretation.
+
+An earlier version scored eight checks using hand-chosen severity floors and saturation points — about twenty constants, each defensible alone and none of them derived. Six of the eight turned out to be the same measurement wearing different clothes: rows that do not survive. Stating it once removed every constant with it.
+
+**U is measured jointly, not combined.** A row survives when *every* column the query reads is usable — one SQL filter, not one rate per column multiplied together. Nulls in civic data cluster heavily — the same contracts tend to be the thin ones — so assuming independence badly overstates the loss. Over the ten mapped columns of Chicago's contracts, 18.7% of rows carry all ten, while multiplying the per-column rates gives 8.9%: half the surviving evidence, discarded by an assumption. One filter measures it directly.
+
+**What is deliberately not scored.** Freshness and lag are reported beside R, never folded into it. Staleness removes no rows, so it has no reading as evidence loss — and how much 122-day-old data matters depends on the question (fine for a 2023 trend, useless for last week), which csq cannot know. Any coefficient there would be invented, so the age is stated as a fact and left to you. A failed sync is likewise a *diagnostic* explaining a shortfall completeness has already counted: scoring it too would bill the same missing rows twice, and would let a sync that failed at 90% read as having delivered nothing.
+
+**Uncertainty is reported, not averaged in.** A check that could not run is excluded from the product, which makes it indistinguishable from one that cost nothing. So the gap travels *beside* R as **coverage**: the share of scored checks actually performed. Shown only when below 100%.
+
+**What R does not mean.** It measures the evidence, not the truth. A dataset that is complete, current and fully populated scores 100% while recording something other than what you think it records, or recording it with a bias no count can see. R is a ceiling on what can be known from this corpus, never a statement that a finding is correct.
+
+The only remaining constants are presentational: the pass/warn/fail cutoffs and the high/moderate/low/insufficient bands, which choose an adjective for an exact number and take no part in computing it. The plausible-date bounds are definitional — DuckDB's own minimum timestamp, and two days' slack for clock skew.
+
+Two further properties are structural rather than incidental:
+
+- **Only the datasets and columns the query actually reads are examined.** A mode binding three datasets, where the query opens one, is not dragged down by a stale dataset the answer never touches — nor flattered by a pristine one. Chicago's six corruption queries score 100, 94, 30, 100, 100 and 100 over the same three datasets — `top-vendors` reads no `department` column, so the 5.7% of contracts missing one cost it nothing.
+- **Concentration is computed only over the rows returned**, and says so. Inferring a global denominator from a top-N result produces a confidently wrong percentage.
+
+Profiling is one aggregate scan per dataset and is cached for five minutes, so a page running six analyses over the same corpus does not scan it eighteen times. Assessing NYC's 5.4M-row complaint table costs about 30ms. A query that cannot be assessed says "not assessed" rather than rendering a zero — they call for opposite responses from a reader.
+
+`csq modes run` prints the block automatically; `--quiet` suppresses it along with the caveats.
 
 ### Serve via MCP
 
@@ -312,6 +391,7 @@ internal/mcpserver/   # MCP server: pools, ATTACH, tools, transports
 internal/snapshot/    # Snapshot publishing: tar+zst format, Pack producer, Fetch consumer
 internal/modes/       # Curated analysis profiles: datasets, queries, caveats
 internal/analysis/    # Headless mode execution: planning, exclusions, readiness
+internal/confidence/  # Data-fitness scoring: dataset profiling, signals, caps
 internal/web/         # Browser UI: JSON API, embedded assets, HTML reports
 ```
 
