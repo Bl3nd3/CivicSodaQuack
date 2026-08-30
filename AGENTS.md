@@ -18,6 +18,8 @@ internal/
   duckdb/          connection helpers and the `_csq` bookkeeping schema
   portallock/      advisory <dbpath>.lock (flock) shared by every subcommand
   modes/           curated analysis profiles: concepts, bindings, queries, caveats
+  personal/        drafts a mode from a question: schema inventory, SQL guard, merge
+  llm/             the one Anthropic call csq makes, constrained to a JSON schema
   analysis/        runs mode queries headlessly, returns structured results
   confidence/      scores how far the data behind an answer can be trusted
   web/             browser UI, CSV/JSON export, standalone HTML reports
@@ -53,6 +55,19 @@ Adding a city means adding a binding. Adding a mode means appending to the
 registry in `internal/modes/` (`var registry` in `modes.go`). Neither touches
 the CLI.
 
+**External modes are the same objects.** `loader.go` reads YAML *and* JSON from
+`~/.csq/modes/` into exactly the `Mode` and `Binding` structs above, through one
+validator with two decoders — both strict about unknown keys, because a silently
+ignored `caveats` or `columns` produces a mode that runs and answers wrongly.
+`schema.go` holds the JSON Schema for those documents, and it is deliberately
+the only copy: `csq modes schema` prints it, and the personal mode constrains
+the model to it. A second hand-maintained copy is the obvious way for the two to
+drift, at which point the model emits documents the loader rejects and the error
+lands on the user.
+
+An external mode **replaces a built-in of the same name**. That is not a
+convenience — it is the mechanism the `personal` mode is built on.
+
 **Confidence** (`internal/confidence/`). Every mode query carries a score: the
 share of the records the query meant to consult that were actually there and
 usable. For each dataset it reads, three counts — `E` rows the portal holds,
@@ -75,6 +90,32 @@ staleness removes no rows, so it has no reading as evidence loss. `U` is
 measured with one joint SQL filter, not per-column rates multiplied — nulls in
 civic data cluster hard, and assuming independence roughly halves the apparent
 survival on real Chicago data.
+
+**The personal mode** (`internal/personal/`). `personalMode` in
+`internal/modes/personal.go` ships *empty* — three queries over the `_csq`
+schema and no concepts — and `csq modes personal "<question>"` replaces it with
+a drafted file. Shipping it concept-free is load-bearing twice over: a mode with
+concepts and no binding cannot run, and `modes_test.go` fails the build for one.
+
+The model authors a mode; it never answers a question. It sees a schema
+inventory (`catalog.go`) and returns two documents; DuckDB produces every number
+the user sees, from SQL they can read. Four gates stand between a draft and the
+disk, cheapest first — the read-only guard and inventory cross-check
+(`guard.go`, `author.go`), the loader's own validation, then `EXPLAIN` on every
+new query (`save.go`). The last one is the only check that can prove the SQL
+resolves against the columns it claims to read, and a failure rolls both files
+back rather than leaving a half-saved mode behind.
+
+Two invariants in that package are easy to break and worth stating:
+
+- **The guard has to accept ordinary analytical SQL.** Its denied words are
+  common English, and civic data is full of them, so it scans SQL with literals
+  and comments blanked out — a vendor named `Create Update Systems Inc` is not a
+  DDL statement. A guard that rejects real queries gets turned off.
+- **A merge never overwrites the user's file.** Existing prose, concepts, query
+  bodies, and column mappings win every conflict; a colliding draft is renamed
+  rather than dropped. The file is the artefact the user owns, and the next
+  question they ask must not revert an edit they made.
 
 ## Conventions
 

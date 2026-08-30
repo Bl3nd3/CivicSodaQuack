@@ -95,6 +95,7 @@ var registry = []*Mode{
 	rankingMode,
 	policeMode,
 	researchMode,
+	personalMode,
 }
 
 // All returns every registered mode, ordered for display.

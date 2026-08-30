@@ -4,6 +4,7 @@ package modes
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,13 @@ import (
 // profile, without a Go toolchain. A file declares either a mode (concepts,
 // queries, caveats) or a binding (one portal's datasets mapped onto a mode's
 // concepts), and csq loads it at startup.
+//
+// Both YAML and JSON are accepted, and they are the same document — the fields,
+// the validation, and the error messages do not vary by extension. YAML is
+// pleasant to hand-write; JSON is what a program emits, which is how the
+// personal mode writes a profile an LLM authored. Anything one can express the
+// other can too, so a generated file stays editable by hand and a hand-written
+// file stays machine-readable.
 //
 // Validation is deliberately strict and the messages are written for someone
 // who is not a Go programmer: unknown keys are rejected rather than silently
@@ -32,48 +40,60 @@ const (
 
 // externalFile is the top level of a modes YAML file.
 type externalFile struct {
-	Kind fileKind `yaml:"kind"`
+	Kind fileKind `yaml:"kind" json:"kind"`
 
 	// Mode fields (kind: mode)
-	Name     string          `yaml:"name"`
-	Title    string          `yaml:"title"`
-	Summary  string          `yaml:"summary"`
-	About    string          `yaml:"about"`
-	Concepts []externalConc  `yaml:"concepts"`
-	Queries  []externalQuery `yaml:"queries"`
-	Caveats  []string        `yaml:"caveats"`
+	Name     string          `yaml:"name" json:"name,omitempty"`
+	Title    string          `yaml:"title" json:"title,omitempty"`
+	Summary  string          `yaml:"summary" json:"summary,omitempty"`
+	About    string          `yaml:"about" json:"about,omitempty"`
+	Concepts []externalConc  `yaml:"concepts" json:"concepts,omitempty"`
+	Queries  []externalQuery `yaml:"queries" json:"queries,omitempty"`
+	Caveats  []string        `yaml:"caveats" json:"caveats,omitempty"`
 
 	// Binding fields (kind: binding)
-	Mode             string `yaml:"mode"`
-	Portal           string `yaml:"portal"`
-	City             string `yaml:"city"`
-	Population       int64  `yaml:"population"`
-	PopulationSource string `yaml:"population_source"`
+	Mode             string `yaml:"mode" json:"mode,omitempty"`
+	Portal           string `yaml:"portal" json:"portal,omitempty"`
+	City             string `yaml:"city" json:"city,omitempty"`
+	Population       int64  `yaml:"population" json:"population,omitempty"`
+	PopulationSource string `yaml:"population_source" json:"population_source,omitempty"`
 
 	//nolint:revive // grouped with the binding fields above for readability.
-	Datasets map[string]externalBind `yaml:"datasets"`
-	Notes    []string                `yaml:"notes"`
+	Datasets map[string]externalBind `yaml:"datasets" json:"datasets,omitempty"`
+	Notes    []string                `yaml:"notes" json:"notes,omitempty"`
 }
 
 type externalConc struct {
-	Name     string   `yaml:"name"`
-	Purpose  string   `yaml:"purpose"`
-	Required []string `yaml:"required"`
-	Optional []string `yaml:"optional"`
+	Name     string   `yaml:"name" json:"name"`
+	Purpose  string   `yaml:"purpose" json:"purpose"`
+	Required []string `yaml:"required" json:"required,omitempty"`
+	Optional []string `yaml:"optional" json:"optional,omitempty"`
 }
 
 type externalQuery struct {
-	Name string `yaml:"name"`
-	Desc string `yaml:"desc"`
-	SQL  string `yaml:"sql"`
+	Name string `yaml:"name" json:"name"`
+	Desc string `yaml:"desc" json:"desc"`
+	SQL  string `yaml:"sql" json:"sql"`
+
+	// Entity and Measure name the result columns a concentration reading is
+	// computed over. Both or neither: a share taken over the wrong column is a
+	// confidently wrong percentage, so an unset pair simply gets no reading.
+	Entity  string `yaml:"entity" json:"entity,omitempty"`
+	Measure string `yaml:"measure" json:"measure,omitempty"`
 }
 
 type externalBind struct {
-	ID    string `yaml:"id"`
-	Table string `yaml:"table"`
-	Name  string `yaml:"name"`
-	Rows  int64  `yaml:"rows"`
-	Notes string `yaml:"notes"`
+	ID    string `yaml:"id" json:"id"`
+	Table string `yaml:"table" json:"table"`
+	Name  string `yaml:"name" json:"name"`
+	Rows  int64  `yaml:"rows" json:"rows,omitempty"`
+	Notes string `yaml:"notes" json:"notes,omitempty"`
+
+	// Columns maps a concept column onto this portal's column, or onto any SQL
+	// expression over it. When non-empty it is authoritative — see the doc
+	// comment on BoundDataset.Columns for why a missing entry must mean
+	// "unavailable here" rather than "not mapped yet".
+	Columns map[string]string `yaml:"columns" json:"columns,omitempty"`
 }
 
 // DefaultModesDir is where csq looks for external modes and bindings.
@@ -108,8 +128,7 @@ func LoadDir(dir string) ([]string, error) {
 		if e.IsDir() {
 			continue
 		}
-		ext := strings.ToLower(filepath.Ext(e.Name()))
-		if ext == ".yaml" || ext == ".yml" {
+		if isModeFileExt(e.Name()) {
 			paths = append(paths, filepath.Join(dir, e.Name()))
 		}
 	}
@@ -171,29 +190,82 @@ func LintFile(path string) (kind string, name string, err error) {
 	return "", "", fmt.Errorf("%s: unreachable", path)
 }
 
+// isModeFileExt reports whether a filename is one csq will try to load.
+func isModeFileExt(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".yaml", ".yml", ".json":
+		return true
+	}
+	return false
+}
+
 func parseFile(path string) (*externalFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	f, err := decodeDocument(path, data)
+	if err != nil {
+		return nil, err
+	}
+	switch f.Kind {
+	case kindMode, kindBinding:
+	case "":
+		return nil, fmt.Errorf("%s: missing 'kind'; the document needs "+
+			"\"kind\": \"mode\" or \"kind\": \"binding\" at its top level",
+			filepath.Base(path))
+	default:
+		return nil, fmt.Errorf("%s: kind %q is not valid; use 'mode' or 'binding'",
+			filepath.Base(path), f.Kind)
+	}
+	return f, nil
+}
+
+// decodeDocument parses one file as JSON or YAML according to its extension.
+//
+// Both decoders are put in strict mode, so an unrecognised key fails the load
+// rather than being dropped. That matters more than it looks: the keys here
+// carry the caveats and the column mappings, and a silently ignored "caveats"
+// or "columns" would produce a mode that runs and answers wrongly, which is
+// worse than one that refuses to load.
+func decodeDocument(path string, data []byte) (*externalFile, error) {
 	var f externalFile
+	base := filepath.Base(path)
+
+	if strings.EqualFold(filepath.Ext(path), ".json") {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&f); err != nil {
+			return nil, fmt.Errorf("%s: %w\n  (csq rejects unknown keys, so a mistyped "+
+				"field is reported here rather than ignored; run 'csq modes schema' "+
+				"for the exact shape)", base, err)
+		}
+		// A second document in the same file would be silently ignored by
+		// Decode, which reads only the first value.
+		if err := trailingJSON(dec); err != nil {
+			return nil, fmt.Errorf("%s: %w", base, err)
+		}
+		return &f, nil
+	}
+
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // typos are errors, not silent no-ops
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("%s: %w\n  (check indentation and spelling; "+
 			"csq rejects unknown keys so a typo is caught here rather than ignored)",
-			filepath.Base(path), err)
-	}
-	switch f.Kind {
-	case kindMode, kindBinding:
-	case "":
-		return nil, fmt.Errorf("%s: missing 'kind'; the first line should be "+
-			"'kind: mode' or 'kind: binding'", filepath.Base(path))
-	default:
-		return nil, fmt.Errorf("%s: kind %q is not valid; use 'mode' or 'binding'",
-			filepath.Base(path), f.Kind)
+			base, err)
 	}
 	return &f, nil
+}
+
+// trailingJSON reports content after the first JSON value. One file holds one
+// document; a second would otherwise load as nothing at all.
+func trailingJSON(dec *json.Decoder) error {
+	if _, err := dec.Token(); err == nil {
+		return fmt.Errorf("contains more than one JSON document; " +
+			"put each mode or binding in its own file")
+	}
+	return nil
 }
 
 func validateMode(f *externalFile, path string) error {
@@ -238,6 +310,16 @@ func validateMode(f *externalFile, path string) error {
 			return fmt.Errorf("%s: query %q is defined twice", base, q.Name)
 		}
 		seenQ[q.Name] = true
+
+		// A concentration reading needs both halves. One without the other is
+		// not a partial feature — it is a column name with nothing to compute
+		// against, and accepting it silently would hide the author's mistake
+		// behind a result that simply never reports concentration.
+		if (q.Entity == "") != (q.Measure == "") {
+			return fmt.Errorf("%s: query %q sets only one of 'entity' and 'measure'. "+
+				"Set both to get a concentration reading, or neither to skip it",
+				base, q.Name)
+		}
 
 		refs := conceptRefs(q.SQL)
 		if len(refs) == 0 {
@@ -296,15 +378,38 @@ func validateBinding(f *externalFile, path string, standalone bool) error {
 		return fmt.Errorf("%s: binding refers to mode %q, which does not exist. "+
 			"Define it in a 'kind: mode' file or check the spelling", base, f.Mode)
 	}
-	for name := range f.Datasets {
-		if _, ok := m.Concept(name); !ok {
+	for name, d := range f.Datasets {
+		c, ok := m.Concept(name)
+		if !ok {
 			known := make([]string, 0, len(m.Concepts))
-			for _, c := range m.Concepts {
-				known = append(known, c.Name)
+			for _, k := range m.Concepts {
+				known = append(known, k.Name)
 			}
 			return fmt.Errorf("%s: mode %q has no concept named %q. "+
 				"Bindings map concepts, not arbitrary names (mode %q declares: %s)",
 				base, f.Mode, name, f.Mode, strings.Join(known, ", "))
+		}
+		// A non-empty column map is authoritative, so a required column absent
+		// from it is not "not mapped yet" — it is a column this portal cannot
+		// supply, and every query reading it would project a column that is not
+		// there. Catching that here is what keeps it from surfacing as a binder
+		// error in the middle of an answer, or worse, as a NULL that reads like
+		// a real value.
+		if len(d.Columns) == 0 {
+			continue
+		}
+		var missing []string
+		for _, col := range c.Required {
+			if _, ok := d.Columns[col]; !ok {
+				missing = append(missing, col)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("%s: dataset %q maps 'columns' but omits %s, which concept "+
+				"%q requires. Add %s (the value may be any SQL expression over this "+
+				"portal's columns), or remove this concept from the binding so queries "+
+				"needing it exclude this portal by name",
+				base, name, strings.Join(missing, ", "), c.Name, strings.Join(missing, ", "))
 		}
 	}
 	return nil
@@ -329,7 +434,10 @@ func applyMode(f *externalFile, path string) error {
 		})
 	}
 	for _, q := range f.Queries {
-		m.Queries = append(m.Queries, Query{Name: q.Name, Desc: q.Desc, SQL: q.SQL})
+		m.Queries = append(m.Queries, Query{
+			Name: q.Name, Desc: q.Desc, SQL: q.SQL,
+			Entity: q.Entity, Measure: q.Measure,
+		})
 	}
 
 	// An external mode replaces a built-in of the same name, so a user can fix
@@ -361,6 +469,7 @@ func applyBinding(f *externalFile, path string) error {
 	for name, d := range f.Datasets {
 		b.Concepts[name] = BoundDataset{
 			ID: d.ID, Table: d.Table, Name: d.Name, Rows: d.Rows, Notes: d.Notes,
+			Columns: d.Columns,
 		}
 	}
 	registerBinding(b)

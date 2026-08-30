@@ -138,6 +138,7 @@ Modes are curated analysis profiles: for a given civic question, the datasets wo
 | `ranking` | cross-portal | Comparison of portal breadth, category coverage, how much you hold locally, and freshness |
 | `police` | single portal | Civilian oversight — COPA/BIA complaint volume, finding and category outcomes, complainant demographics, officer tenure, shootings, beat distribution |
 | `research` | cross-portal | Provenance for citation, failed-run and coverage gaps, schema inventory, candidate join keys, and generated data-quality checks |
+| `personal` | cross-portal | Your own mode. Ships empty — an inventory of what you hold — until `csq modes personal "<question>"` drafts queries for it |
 
 For a mode with datasets, generate a config and sync it, then run the queries:
 
@@ -171,7 +172,59 @@ Each mode carries interpretation caveats, printed by `modes show`, printed above
 - **`police` is civilian-side oversight only**, reading accountability records about the department. Chicago's published COPA and BIA extracts carry no officer identifier, so repeat-officer analysis is not possible with them; arrest volume is included solely as a denominator for complaint rates.
 - **A recent timestamp does not mean recent data.** `research --query provenance` reports when *csq* last pulled a dataset, which says nothing about the city. `_csq.catalog.updated_at` is better — it carries the portal's `data_updated_at`, ignoring metadata edits so that rewriting a description no longer makes a stale dataset look current — but it still moves when a portal republishes unchanged rows. The five Cook County State's Attorney datasets in `datacatalog.cookcountyil.gov.yaml` are the live example: abandoned by the SAO on 2024-12-30 with coverage ending 2024-11-30, yet `updated_at` reads 2026-04-02. Read the dataset's own description before describing anything as current; no timestamp on either side is sufficient.
 
-Adding a mode means appending to the registry in `internal/modes/`, not touching the CLI.
+Adding a built-in mode means appending to the registry in `internal/modes/`, not touching the CLI. You do not need a Go toolchain to add one of your own — see below.
+
+### Writing your own modes
+
+A mode is data. Drop a YAML or JSON file into `~/.csq/modes/` (override with `--modes-dir` or `CSQ_MODES_DIR`) and csq loads it at startup, with no rebuild. The two formats are the same document with the same field names, the same validation, and the same error messages; JSON exists because programs write it.
+
+```bash
+./csq modes schema                  # the exact shape a file must match
+./csq modes lint my-mode.json       # check it before use
+./csq modes where                   # where files are loaded from, and what loaded
+```
+
+A file declares either a **mode** (`kind: mode`) or a **binding** (`kind: binding`):
+
+- A **mode** names the *concepts* it needs — logical tables described by what they must contain — plus the SQL and the caveats. Queries refer to a table only as `{{c:concept_name}}` and to columns by canonical names, which is what lets one mode serve several cities.
+- A **binding** maps one portal's actual tables and columns onto those concepts. A `columns` value may be any SQL expression, so a portal publishing money as text or a date as `MM/DD/YYYY` binds through `TRY_CAST(amt AS DOUBLE)` or `try_strptime(issued, '%m/%d/%Y')` without any query knowing.
+
+Two rules the loader enforces rather than suggests. Every mode must declare `caveats` — a number without its limits is how civic data gets misread, and a file without them does not load. And when a binding supplies a `columns` map, that map is authoritative: a required column missing from it is an error at load time, because treating it as merely unmapped would let a `NULL` read as a real value, which for a rate is indistinguishable from a good answer.
+
+An external mode **replaces a built-in of the same name**, so you can fix or extend a shipped mode without rebuilding csq.
+
+### The `personal` mode
+
+`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. Ask a question in English and csq drafts the mode for you:
+
+```bash
+./csq modes personal "which vendors got the most money last year?" \
+    --db data.cityofchicago.org.duckdb
+```
+
+csq reads your database's schema — table names, column names, and types — sends that to Claude with the same JSON Schema `csq modes schema` prints, and asks for concepts, SQL, and caveats. What comes back is checked before it is kept:
+
+1. every query must be a single read-only `SELECT` (no DDL, no DML, no `ATTACH`/`COPY`/`INSTALL`, no file-reading functions like `read_csv`);
+2. every bound table and plain column mapping must exist in *your* database, not in the model's recollection;
+3. the files must pass the same loader that validates a hand-written mode;
+4. DuckDB must be able to plan every new query.
+
+Fail any of these and nothing is saved. Pass them and you get two JSON files in your modes directory, and `personal` becomes an ordinary mode — same runner, same bindings, same confidence scores:
+
+```bash
+./csq modes show personal                              # read the SQL it wrote
+./csq modes run  personal --db data.cityofchicago.org.duckdb
+```
+
+Ask another question and the queries are **appended**. Merging is deterministic and your file wins every conflict, so a caveat you sharpened or a column mapping you corrected survives the next question. Editing the file is expected, not a workaround.
+
+Useful flags: `--dry-run` prints the draft without saving it, `--as <name>` builds a separate named mode instead of `personal`, `--run` executes the new queries immediately, and `--samples` also sends a few distinct values from low-cardinality text columns — which is how a generated filter learns the portal writes `STREETS & SAN` rather than `Streets and Sanitation`.
+
+Three things worth being clear about:
+
+- **This is the only part of csq that talks to the network at analysis time**, and the only part that needs an `ANTHROPIC_API_KEY` (or a profile from `ant auth login`). Every other mode runs entirely locally. csq states what it is about to send and asks before sending it; `--yes` skips the prompt.
+- **No rows leave your machine unless you pass `--samples`.** The model sees a schema, never a result. It does not execute anything and does not produce any number you are shown — DuckDB does, from SQL you can read.
+- **The model chose which columns to trust, and it can misread what a column means.** csq can prove a query is read-only, valid, and planable; it cannot prove the query measures what you meant. Every drafted mode carries a caveat saying so, and it is not removable. Read the SQL before quoting a result.
 
 ### Confidence scores
 

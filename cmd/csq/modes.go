@@ -28,12 +28,20 @@ Usage:
   csq modes show <mode>                  Concepts, portals, queries, and caveats
   csq modes init <mode> [--portal HOST] [--output FILE]
   csq modes run  <mode> --db <file> [--db ...] [--query NAME] [--limit N]
-  csq modes lint <file.yaml> ...         Check an external mode or binding file
+  csq modes lint <file> ...              Check an external mode or binding file
+  csq modes schema                       Print the JSON Schema a mode file must match
+  csq modes personal "<question>" --db <file>
+                                         Draft a mode from a question (uses Claude)
   csq modes where                        Show where external modes are loaded from
 
-Modes and bindings can be added as YAML in ~/.csq/modes/ (override with
---modes-dir or CSQ_MODES_DIR) without rebuilding csq. Run 'csq modes lint'
-on a file to check it before use.
+Modes and bindings can be added as YAML or JSON in ~/.csq/modes/ (override with
+--modes-dir or CSQ_MODES_DIR) without rebuilding csq. The two formats are the
+same document: 'csq modes schema' prints the shape, and 'csq modes lint' checks
+a file before use. An external mode replaces a built-in of the same name.
+
+'csq modes personal' writes one of those files for you: it shows Claude the
+tables you hold — names, columns, and types, never the rows — and saves the
+drafted mode as JSON you can read and edit.
 
 Examples:
   csq modes
@@ -42,6 +50,7 @@ Examples:
   csq sync --config police.yaml
   csq modes run police --db data.cityofchicago.org.duckdb --query finding-outcomes
   csq modes run ranking --db chicago.duckdb --db cookcounty.duckdb
+  csq modes personal "which vendors got the most money?" --db chicago.duckdb
 `
 
 func runModes(args []string) error {
@@ -61,6 +70,10 @@ func runModes(args []string) error {
 		return listModes(os.Stdout)
 	case "lint":
 		return lintModeFiles(args[1:])
+	case "schema":
+		return printModeSchema(os.Stdout)
+	case "personal":
+		return runPersonalMode(args[1:])
 	case "where":
 		return showModesDir(os.Stdout)
 	case "-h", "--help", "help":
@@ -581,10 +594,25 @@ func pickBinding(m *modes.Mode, portal string) (*modes.Binding, error) {
 	}
 }
 
+// printModeSchema writes the JSON Schema a mode or binding file must satisfy.
+//
+// It is the same schema the personal mode constrains Claude to, which is the
+// point of printing it: what a person may write by hand and what a model may
+// draft are one grammar, so a generated file is editable and a hand-written one
+// is loadable, with no second format to learn.
+func printModeSchema(out *os.File) error {
+	s, err := modes.SchemaJSON()
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprint(out, s)
+	return err
+}
+
 // lintModeFiles validates external mode/binding files without registering them.
 func lintModeFiles(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: csq modes lint <file.yaml> [file.yaml ...]")
+		return fmt.Errorf("usage: csq modes lint <file> [file ...]  (.yaml, .yml, or .json)")
 	}
 	var bad int
 	for _, path := range args {
