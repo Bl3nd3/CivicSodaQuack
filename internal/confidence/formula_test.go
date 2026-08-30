@@ -68,6 +68,38 @@ func TestReport_ProductRunsAcrossDatasets(t *testing.T) {
 	}
 }
 
+// Across datasets, R is conjunctive: it reads "every dataset held up", not
+// "this share of the pooled records held up". The two part company as soon as
+// more than one dataset is scored, and the difference is large enough that
+// stating the wrong one in a caption would misinform.
+//
+// Two datasets, each holding half of its intended evidence: R is 25%, while the
+// share of the pooled records that survived is 50%. Both are defensible
+// numbers; only one is what this package computes. The conjunctive reading is
+// the conservative one — it is the right answer for a join, where a row needs
+// every side to be usable, and a lower bound for a union.
+//
+// This test exists to keep the two from being confused. If a future change
+// makes R the pooled share, that is a decision to take deliberately, with the
+// package doc and the README moved with it — not something to discover from a
+// caption that no longer matches the arithmetic.
+func TestReport_AcrossDatasetsIsConjunctiveNotPooled(t *testing.T) {
+	rep := &Report{Datasets: []DatasetReport{
+		{Signals: []Signal{scored("half", 0.5)}},
+		{Signals: []Signal{scored("half", 0.5)}},
+	}}
+	rep.finalize()
+
+	if rep.Score != 25 {
+		t.Errorf("Score = %d, want 25 (0.5 × 0.5, the conjunctive reading)", rep.Score)
+	}
+	// The pooled share of the same two datasets, for contrast. Equal sizes, so
+	// it is the plain mean of the retentions.
+	if pooled := pctOf((0.5 + 0.5) / 2); rep.Score == pooled {
+		t.Errorf("conjunctive and pooled agree at %d; the test has stopped distinguishing them", pooled)
+	}
+}
+
 // Every scored retention is a count divided by a count, so R for one dataset
 // is exactly U/E — and factors into the two stages a reader acts on.
 func TestRetention_FactorsIntoCompletenessTimesUsability(t *testing.T) {
