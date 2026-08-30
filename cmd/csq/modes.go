@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -491,12 +492,28 @@ func runAndPrint(db *sql.DB, query string) ([]string, [][]any, error) {
 	return cols, out, nil
 }
 
+// renderCell formats one scanned value, for both the text table and the CSV
+// writer in query.go.
+//
+// Floats go through strconv rather than %v because %v means %g for a float,
+// which switches to an exponent past six significant digits: a contract total
+// of 68124705936.3 printed as 6.81247059363e+10. That is unreadable in a money
+// column, and CSV consumers import it as text. Precision -1 emits the shortest
+// decimal that still round-trips exactly, so readability costs no accuracy.
+//
+// Deliberately no thousands separators: this feeds --format csv as well as the
+// table, and a separator would make every numeric column a string downstream.
+// internal/web/export.go formats exported cells the same way.
 func renderCell(v any) string {
 	switch t := v.(type) {
 	case nil:
 		return "-"
 	case []byte:
 		return string(t)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case float32:
+		return strconv.FormatFloat(float64(t), 'f', -1, 32)
 	default:
 		return fmt.Sprintf("%v", t)
 	}
