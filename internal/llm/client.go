@@ -48,6 +48,32 @@ type Options struct {
 	APIKey string
 }
 
+// Config is the model selection, resolved from options, the environment, and
+// the defaults, in that order.
+//
+// It is separate from Client because it needs no credentials. The draft cache
+// keys on the model and effort, so csq has to know them to decide whether a
+// cached draft applies — and it must be able to answer that question, and serve
+// the draft, without an API key. A cache hit makes no network call, so
+// demanding a credential for one would be asking for something it will not use.
+type Config struct {
+	Model  string
+	Effort string
+}
+
+// ResolveConfig determines the model and effort without contacting anything or
+// requiring a credential.
+func ResolveConfig(opts Options) (Config, error) {
+	cfg := Config{
+		Model:  firstNonEmpty(opts.Model, os.Getenv("CSQ_LLM_MODEL"), DefaultModel),
+		Effort: firstNonEmpty(opts.Effort, os.Getenv("CSQ_LLM_EFFORT"), DefaultEffort),
+	}
+	if _, err := parseEffort(cfg.Effort); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
+
 // Client wraps the Anthropic API for csq's one use of it.
 type Client struct {
 	api    anthropic.Client
@@ -58,10 +84,11 @@ type Client struct {
 // New builds a client, resolving the model and effort from options, then the
 // environment, then the defaults.
 func New(opts Options) (*Client, error) {
-	model := firstNonEmpty(opts.Model, os.Getenv("CSQ_LLM_MODEL"), DefaultModel)
-	effort := firstNonEmpty(opts.Effort, os.Getenv("CSQ_LLM_EFFORT"), DefaultEffort)
-
-	e, err := parseEffort(effort)
+	cfg, err := ResolveConfig(opts)
+	if err != nil {
+		return nil, err
+	}
+	e, err := parseEffort(cfg.Effort)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +102,7 @@ func New(opts Options) (*Client, error) {
 
 	return &Client{
 		api:    anthropic.NewClient(sdkOpts...),
-		model:  model,
+		model:  cfg.Model,
 		effort: e,
 	}, nil
 }

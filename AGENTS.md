@@ -20,6 +20,7 @@ internal/
   modes/           curated analysis profiles: concepts, bindings, queries, caveats
   personal/        drafts a mode from a question: schema inventory, SQL guard, merge
   llm/             the one Anthropic call csq makes, constrained to a JSON schema
+  cache/           drafted replies on disk, with the fingerprint that invalidates them
   analysis/        runs mode queries headlessly, returns structured results
   confidence/      scores how far the data behind an answer can be trusted
   web/             browser UI, CSV/JSON export, standalone HTML reports
@@ -116,6 +117,33 @@ Two invariants in that package are easy to break and worth stating:
   bodies, and column mappings win every conflict; a colliding draft is renamed
   rather than dropped. The file is the artefact the user owns, and the next
   question they ask must not revert an edit they made.
+
+**The draft cache** (`internal/cache/`). csq caches the model's reply and never
+a query result. A draft is code and means the same thing tomorrow; a result is
+data the portal may have revised, and reusing one would defeat the confidence
+scores. `csq modes run` always re-executes.
+
+Two rules keep it honest, and both are easy to erode:
+
+- **The fingerprint must cover every input that can change a draft.** It is
+  built in `personal/author.go`, next to the prompt it fingerprints, precisely
+  so that adding an input to the prompt and forgetting it here is hard. Leave
+  one out and the result is not a smaller key — it is a cache that hands back
+  SQL written for a schema that no longer exists.
+- **A hit skips the network call and nothing else.** The cache stores the raw
+  reply, so a cached draft re-enters parsing, the guard, the cross-check, the
+  loader, and `EXPLAIN` exactly as a fresh one does. Caching the *checked* draft
+  would turn the cache into a way to skip the checks.
+
+Miss, stale, and corrupt are distinct states with distinct reasons, for the same
+reason "could not measure" and "measured zero" are distinct elsewhere. Staleness
+is normal and explains itself; corruption means an entry is damaged or lying
+about itself, which is what `csq cache verify` looks for. There is no expiry on
+read — the fingerprint, not the clock, decides.
+
+One trap worth knowing: `json.MarshalIndent` re-indents an embedded
+`json.RawMessage`, so a payload stored that way never round-trips byte-exactly
+and its checksum fails on every read. The payload is a `string` for that reason.
 
 ## Conventions
 

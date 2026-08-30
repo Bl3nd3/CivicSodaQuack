@@ -10,11 +10,13 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	flag "github.com/spf13/pflag"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/neomantra/CivicSodaQuack/internal/cache"
 	"github.com/neomantra/CivicSodaQuack/internal/llm"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 	"github.com/neomantra/CivicSodaQuack/internal/personal"
@@ -69,7 +71,11 @@ func runPersonalMode(args []string) error {
 		dryRun  bool
 		runNow  bool
 		assume  bool
+		noCache bool
+		refresh bool
 	)
+	fs.BoolVar(&noCache, "no-cache", false, "Neither read nor write the draft cache")
+	fs.BoolVar(&refresh, "refresh", false, "Ignore any cached draft and call the model again")
 	fs.StringVar(&dbPath, "db", "", "Portal DuckDB to write the mode against")
 	fs.StringVar(&portal, "portal", "", "Socrata host this DB came from")
 	fs.StringVar(&city, "city", "", "Jurisdiction label for the binding")
@@ -144,30 +150,59 @@ func runPersonalMode(args []string) error {
 		return err
 	}
 
-	// Contacting an external API is the one step here the user may not have
-	// meant to take, so it is stated plainly and confirmed by default.
-	if err := confirmAPICall(inv, asName, samples, assume, dryRun); err != nil {
-		return err
-	}
-
-	client, err := llm.New(llm.Options{Model: model, Effort: effort})
+	cfg, err := llm.ResolveConfig(llm.Options{Model: model, Effort: effort})
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "[csq] asking %s to draft %q (effort %s)\n",
-		client.Model(), asName, client.Effort())
+	var store *cache.Store
+	if !noCache {
+		// A cache that will not open is a slower csq, not a broken one.
+		s, err := cache.Open(cache.DefaultDir())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[csq] warning: draft cache unavailable: %v\n", err)
+		} else {
+			store = s
+		}
+	}
 
-	draft, err := personal.Author(context.Background(), client, personal.Request{
+	req := personal.Request{
 		Question: question,
 		ModeName: asName,
 		Portal:   inv,
 		City:     city,
 		Existing: existing,
-	})
+		Samples:  samples,
+		Cache:    store,
+		Refresh:  refresh,
+	}
+
+	// Whether an API call will happen decides everything below: a cached draft
+	// needs no credential, no confirmation, and no network. Asking permission
+	// to contact a service csq is not about to contact would train the user to
+	// dismiss the prompt that matters.
+	verdict := personal.Peek(cfg, req)
+	willCall := refresh || !verdict.Hit()
+	reportCacheVerdict(verdict, refresh)
+
+	var client *llm.Client
+	if willCall {
+		if err := confirmAPICall(inv, asName, samples, assume, dryRun); err != nil {
+			return err
+		}
+		client, err = llm.New(llm.Options{Model: model, Effort: effort})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[csq] asking %s to draft %q (effort %s)\n",
+			cfg.Model, asName, cfg.Effort)
+	}
+
+	draft, outcome, err := personal.Author(context.Background(), client, cfg, req)
 	if err != nil {
 		return err
 	}
+	reportCacheOutcome(outcome)
 
 	newQueries := draftedQueryNames(existing, draft)
 
@@ -218,6 +253,67 @@ func runPersonalMode(args []string) error {
 		}
 	}
 	return nil
+}
+
+// reportCacheVerdict explains, before anything is billed, what the cache had.
+//
+// A stale entry is named along with what changed. "No cached draft" and "a
+// cached draft that no longer applies because you synced two new columns" are
+// different situations, and only the second tells the user why they are paying
+// for a question they already asked.
+func reportCacheVerdict(v cache.Verdict, refresh bool) {
+	switch v.State {
+	case cache.StateHit:
+		if refresh {
+			fmt.Fprintf(os.Stderr,
+				"[csq] a cached draft matches, but --refresh was given; calling the model\n")
+			return
+		}
+		age := time.Since(v.Entry.CreatedAt).Round(time.Minute)
+		fmt.Fprintf(os.Stderr,
+			"[csq] reusing the draft cached %s ago; no API call, nothing billed\n",
+			humaniseAge(age))
+	case cache.StateStale:
+		fmt.Fprintf(os.Stderr,
+			"[csq] a draft for this question was cached %s ago but no longer applies:\n",
+			humaniseAge(time.Since(v.Entry.CreatedAt).Round(time.Minute)))
+		for _, r := range v.Reasons {
+			fmt.Fprintf(os.Stderr, "        - %s\n", r)
+		}
+	case cache.StateCorrupt:
+		fmt.Fprintf(os.Stderr, "[csq] the cached draft for this question is unusable:\n")
+		for _, r := range v.Reasons {
+			fmt.Fprintf(os.Stderr, "        - %s\n", r)
+		}
+		fmt.Fprintf(os.Stderr, "        it will be replaced. 'csq cache verify' checks the rest.\n")
+	}
+}
+
+// reportCacheOutcome reports anything the cache had to say after the fact,
+// which is currently only a failed write — worth knowing, never worth failing
+// the command for.
+func reportCacheOutcome(o personal.Outcome) {
+	if o.Cached {
+		return
+	}
+	for _, r := range o.Verdict.Reasons {
+		if strings.HasPrefix(r, "the draft could not be cached") {
+			fmt.Fprintf(os.Stderr, "[csq] warning: %s\n", r)
+		}
+	}
+}
+
+func humaniseAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "moments"
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d days", int(d.Hours()/24))
+	}
 }
 
 // confirmAPICall states what is about to leave the machine, and to where.

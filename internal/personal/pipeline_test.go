@@ -3,14 +3,19 @@
 package personal
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 
+	"github.com/neomantra/CivicSodaQuack/internal/cache"
+	"github.com/neomantra/CivicSodaQuack/internal/llm"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
 
@@ -251,6 +256,124 @@ func TestPipeline_DraftIsSavedValidatedAndRuns(t *testing.T) {
 	// 1200000.50 + 800000 — proof the VARCHAR column was really cast.
 	if total != 2000000.50 {
 		t.Errorf("total = %v, want 2000000.5", total)
+	}
+}
+
+// The cache's headline property, proved without touching the API: a draft
+// already on disk is served with no client at all.
+//
+// That is what makes a cache hit free in every sense — no call, no credential,
+// no network — and it is why the CLI peeks before it asks permission to contact
+// anything.
+func TestCache_ServesADraftOfflineWithNoClient(t *testing.T) {
+	host := attachReadOnly(t, buildTestDB(t), "p")
+
+	inv, err := Describe(host, "p", testPortal)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("cache: %v", err)
+	}
+
+	cfg := llm.Config{Model: "claude-opus-5", Effort: "high"}
+	req := Request{
+		Question: "which vendors got the most money?",
+		ModeName: "cache-test",
+		Portal:   inv,
+		City:     "Example, EX",
+		Cache:    store,
+	}
+
+	// Seed the store with exactly the bytes a model would have returned.
+	payload, err := json.Marshal(draftFor("cache-test"))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	fp := Fingerprint(req, cfg, systemPrompt(), draftSchema())
+	if _, err := store.Put(fp, req.Question, payload); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	if v := Peek(cfg, req); !v.Hit() {
+		t.Fatalf("the seeded entry should hit, got %s (%v)", v.State, v.Reasons)
+	}
+
+	// A nil client is the point: reaching the model here would be a nil
+	// dereference, so a pass proves no call was attempted.
+	draft, outcome, err := Author(context.Background(), nil, cfg, req)
+	if err != nil {
+		t.Fatalf("author from cache: %v", err)
+	}
+	if !outcome.Cached {
+		t.Error("the draft should be reported as cached")
+	}
+	if len(draft.Mode.Queries) != 1 || draft.Mode.Queries[0].Name != "top-vendors" {
+		t.Errorf("the cached draft came back wrong: %+v", draft.Mode.Queries)
+	}
+	// The checks still ran: the provenance caveat is applied to a cached draft
+	// exactly as to a fresh one.
+	var hasProvenance bool
+	for _, c := range draft.Mode.Caveats {
+		if c == GeneratedCaveat {
+			hasProvenance = true
+		}
+	}
+	if !hasProvenance {
+		t.Error("a cached draft must still get the provenance caveat")
+	}
+}
+
+// A cached draft must not survive a schema change. The old SQL may still plan
+// while meaning something different, which is the failure a cache can cause
+// that a missing cache never can.
+func TestCache_SchemaChangeInvalidatesTheDraft(t *testing.T) {
+	host := attachReadOnly(t, buildTestDB(t), "p")
+	inv, err := Describe(host, "p", testPortal)
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("cache: %v", err)
+	}
+
+	cfg := llm.Config{Model: "claude-opus-5", Effort: "high"}
+	req := Request{
+		Question: "which vendors got the most money?",
+		ModeName: "cache-test",
+		Portal:   inv,
+		Cache:    store,
+	}
+	payload, _ := json.Marshal(draftFor("cache-test"))
+	fp := Fingerprint(req, cfg, systemPrompt(), draftSchema())
+	if _, err := store.Put(fp, req.Question, payload); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// A column appears, as it would after a resync against a changed dataset.
+	changed := *inv
+	changed.Tables = append([]Table(nil), inv.Tables...)
+	changed.Tables[0].Columns = append(
+		append([]Column(nil), inv.Tables[0].Columns...),
+		Column{Name: "award_date", Type: "DATE"},
+	)
+	moved := req
+	moved.Portal = &changed
+
+	v := Peek(cfg, moved)
+	if v.State != cache.StateStale {
+		t.Fatalf("a new column should make the entry stale, got %s", v.State)
+	}
+	if !strings.Contains(strings.Join(v.Reasons, " "), "tables you hold changed") {
+		t.Errorf("the reason should name the schema change, got %v", v.Reasons)
+	}
+
+	// And with no client available, Author must say so plainly rather than
+	// silently serving the stale draft.
+	if _, _, err := Author(context.Background(), nil, cfg, moved); err == nil {
+		t.Error("a stale entry with no client should be an error, not a silent reuse")
 	}
 }
 

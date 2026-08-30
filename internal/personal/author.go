@@ -7,10 +7,54 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/neomantra/CivicSodaQuack/internal/cache"
 	"github.com/neomantra/CivicSodaQuack/internal/llm"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
+	"github.com/neomantra/CivicSodaQuack/internal/version"
 )
+
+// Fingerprint gathers every input that determines a draft.
+//
+// It lives here rather than in the cache package because this is where the
+// inputs are: adding a new one to the prompt and forgetting to add it here is
+// the way a cache starts serving the wrong draft, and keeping the two in the
+// same file is the cheapest defence against that.
+func Fingerprint(req Request, cfg llm.Config, system string, schema map[string]any) cache.Fingerprint {
+	return cache.Fingerprint{
+		Format:          cache.FormatVersion,
+		CsqVersion:      version.Version,
+		Model:           cfg.Model,
+		Effort:          cfg.Effort,
+		PromptDigest:    cache.DigestString(system),
+		SchemaDigest:    cache.DigestJSON(schema),
+		Question:        cache.NormaliseQuestion(req.Question),
+		ModeName:        req.ModeName,
+		Portal:          req.Portal.Host,
+		InventoryDigest: cache.InventoryDigestOf(req.Portal.Shape()),
+		Samples:         req.Samples,
+		ExistingDigest:  existingDigest(req.Existing),
+	}
+}
+
+// existingDigest hashes what the model is told already exists. Only the parts
+// shown to it matter: the concept and query names it is asked not to repeat.
+// Hashing the whole document would invalidate the cache when a user edits a
+// caveat, which changes nothing about what is being asked.
+func existingDigest(d *Document) string {
+	if d == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range d.Concepts {
+		fmt.Fprintf(&b, "C %s %s %v %v\n", c.Name, c.Purpose, c.Required, c.Optional)
+	}
+	for _, q := range d.Queries {
+		fmt.Fprintf(&b, "Q %s %s\n", q.Name, q.Desc)
+	}
+	return cache.DigestString(b.String())
+}
 
 // DefaultModeName is the mode a drafted profile lands in unless --as names
 // another. "personal" is the user's own mode: whatever they have asked about,
@@ -30,6 +74,29 @@ type Request struct {
 	// Existing is the current mode document, when one is already on disk.
 	// Queries are appended to it rather than replacing it.
 	Existing *Document
+	// Samples records whether the inventory carries sample values, so a run
+	// that showed them never reuses a draft written without them.
+	Samples bool
+
+	// Cache, when set, is consulted before the model is called and written to
+	// after. A nil store simply disables caching.
+	Cache *cache.Store
+	// Refresh calls the model even when a valid entry exists, and replaces it.
+	// It is the escape hatch for the one input the fingerprint cannot see: the
+	// model itself, which can change behind a stable id.
+	Refresh bool
+}
+
+// Outcome records how a draft was obtained, so the caller can tell the user
+// whether they were billed for it.
+type Outcome struct {
+	// Verdict is what the cache concluded. Its State is StateMiss when no
+	// store was configured.
+	Verdict cache.Verdict
+	// Cached reports that the draft came from the store rather than the API.
+	Cached bool
+	// Elapsed is how long obtaining the draft took.
+	Elapsed time.Duration
 }
 
 // Draft is what the model returned, after parsing and local checks.
@@ -101,38 +168,90 @@ const GeneratedCaveat = "These queries were drafted by a language model from the
 	"can misread what a column means. Read the SQL under 'csq modes show' before quoting a " +
 	"result, and treat a surprising figure as a reason to check the query first."
 
-// Author asks the model for a mode and a binding, then checks what came back.
+// Peek reports what the cache holds for a request without calling anything.
+//
+// The CLI uses it to decide whether an API call is going to happen at all, so
+// it can skip both the credential check and the "about to contact the API"
+// confirmation when the answer is already on disk.
+func Peek(cfg llm.Config, req Request) cache.Verdict {
+	if req.Cache == nil || req.Portal == nil {
+		return cache.Verdict{}
+	}
+	return req.Cache.Lookup(Fingerprint(req, cfg, systemPrompt(), draftSchema()))
+}
+
+// Author obtains a draft — from the cache when every input still matches,
+// otherwise from the model — and checks what came back.
 //
 // The returned draft has been parsed, had its identity fields forced to match
 // what the caller asked for, and had every query's SQL checked as read-only. It
 // has not yet been validated by the loader or executed — see Save and Verify.
-func Author(ctx context.Context, c *llm.Client, req Request) (*Draft, error) {
+//
+// c may be nil when the cache is certain to hit; Author returns a clear error
+// rather than a nil dereference if it turns out a call was needed after all.
+func Author(ctx context.Context, c *llm.Client, cfg llm.Config, req Request) (*Draft, Outcome, error) {
+	started := time.Now()
+	var out Outcome
+
 	if strings.TrimSpace(req.Question) == "" {
-		return nil, fmt.Errorf("no question given")
+		return nil, out, fmt.Errorf("no question given")
 	}
 	if req.Portal == nil || len(req.Portal.Tables) == 0 {
-		return nil, fmt.Errorf(
+		return nil, out, fmt.Errorf(
 			"this database holds no synced tables, so there is nothing to write a mode against.\n" +
 				"  Sync something first, e.g. 'csq modes init corruption --output c.yaml && csq sync --config c.yaml'")
 	}
 
-	raw, err := c.JSON(ctx, llm.JSONRequest{
-		System: systemPrompt(),
-		User:   userPrompt(req),
-		Schema: draftSchema(),
-	})
-	if err != nil {
-		return nil, err
+	system := systemPrompt()
+	user := userPrompt(req)
+	schema := draftSchema()
+	fp := Fingerprint(req, cfg, system, schema)
+
+	// The cache is consulted for the model's raw reply only. Everything below
+	// this point — parsing, the identity overrides, the read-only guard, the
+	// inventory cross-check — runs identically whether the bytes came from the
+	// API or from disk, so a cached draft is never trusted more than a fresh
+	// one. Caching the *checked* draft instead would make the cache a way to
+	// skip the checks, which is the one thing it must never be.
+	var raw []byte
+	if req.Cache != nil {
+		out.Verdict = req.Cache.Lookup(fp)
 	}
+	if out.Verdict.Hit() && !req.Refresh {
+		raw = []byte(out.Verdict.Entry.Payload)
+		out.Cached = true
+		_ = req.Cache.Touch(out.Verdict.Entry)
+	} else {
+		if c == nil {
+			return nil, out, fmt.Errorf(
+				"a model call is needed but no client was configured (the cached draft "+
+					"was %s)", out.Verdict.State)
+		}
+		var err error
+		raw, err = c.JSON(ctx, llm.JSONRequest{System: system, User: user, Schema: schema})
+		if err != nil {
+			return nil, out, err
+		}
+		if req.Cache != nil {
+			// A cache that cannot be written is a slower csq, not a broken one.
+			// The draft is in hand and the user asked for a mode, not for a
+			// cache write, so this failure must not lose them the answer.
+			if _, err := req.Cache.Put(fp, req.Question, raw); err != nil {
+				out.Verdict.Reasons = append(out.Verdict.Reasons,
+					fmt.Sprintf("the draft could not be cached: %v", err))
+			}
+		}
+	}
+	out.Elapsed = time.Since(started)
 
 	var d Draft
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&d); err != nil {
-		return nil, fmt.Errorf("the model's draft did not parse: %w", err)
+		return nil, out, fmt.Errorf("the model's draft did not parse: %w", err)
 	}
 	if d.Mode == nil || d.Binding == nil {
-		return nil, fmt.Errorf("the model's draft was missing its mode or its binding")
+		return nil, out, fmt.Errorf("the model's draft was missing its mode or its binding")
 	}
 
 	// Identity is csq's to set, not the model's. Forcing these removes a whole
@@ -154,14 +273,14 @@ func Author(ctx context.Context, c *llm.Client, req Request) (*Draft, error) {
 	d.Binding.PopulationSource = ""
 
 	if err := d.check(req.Portal); err != nil {
-		return nil, err
+		return nil, out, err
 	}
 	d.Mode.Caveats = appendUnique(d.Mode.Caveats, GeneratedCaveat)
 
 	if req.Existing != nil {
 		d.Mode = mergeMode(req.Existing, d.Mode)
 	}
-	return &d, nil
+	return &d, out, nil
 }
 
 // check applies the constraints the schema cannot express: that SQL is

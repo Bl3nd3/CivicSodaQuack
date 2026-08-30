@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomantra/CivicSodaQuack/internal/cache"
 	"github.com/neomantra/CivicSodaQuack/internal/llm"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
@@ -106,21 +107,44 @@ func TestLive_AuthorDraftsARunnableMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
+	cfg, err := llm.ResolveConfig(llm.Options{})
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+
+	// A cache in a temp dir, so the live test neither reads nor pollutes the
+	// user's real one — and so the second call below is guaranteed to be a hit
+	// on an entry this test wrote.
+	store, err := cache.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("cache: %v", err)
+	}
+
+	req := Request{
+		Question: question,
+		ModeName: modeName,
+		Portal:   inv,
+		City:     portal,
+		Samples:  os.Getenv("CSQ_LIVE_SAMPLES") == "1",
+		Cache:    store,
+	}
 
 	// Generous: a high-effort draft over a wide schema is not a fast call, and
 	// a timeout here would look like a bug in the code under test.
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
+	if v := Peek(cfg, req); v.State != cache.StateMiss {
+		t.Fatalf("a fresh cache should miss, got %s", v.State)
+	}
+
 	start := time.Now()
-	draft, err := Author(ctx, client, Request{
-		Question: question,
-		ModeName: modeName,
-		Portal:   inv,
-		City:     portal,
-	})
+	draft, outcome, err := Author(ctx, client, cfg, req)
 	if err != nil {
 		t.Fatalf("author: %v", err)
+	}
+	if outcome.Cached {
+		t.Error("the first call should not have come from the cache")
 	}
 	t.Logf("drafted in %s using %s", time.Since(start).Round(time.Second), client.Model())
 
@@ -197,6 +221,42 @@ func TestLive_AuthorDraftsARunnableMode(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 	t.Logf("query %q returned %d rows over columns %v", m.Queries[0].Name, n, cols)
+
+	// The same question again must be served from disk, with no second call —
+	// which is the whole point of the cache and the only place a real reply
+	// proves the round-trip through JSON, checksum, and fingerprint survives.
+	cachedDraft, cachedOutcome, err := Author(ctx, nil, cfg, req)
+	if err != nil {
+		t.Fatalf("the cached draft did not survive a re-read: %v", err)
+	}
+	if !cachedOutcome.Cached {
+		t.Fatal("the second call should have been served from the cache")
+	}
+	if len(cachedDraft.Mode.Queries) != len(draft.Mode.Queries) {
+		t.Errorf("cached draft has %d queries, the original had %d",
+			len(cachedDraft.Mode.Queries), len(draft.Mode.Queries))
+	}
+	for i := range draft.Mode.Queries {
+		if cachedDraft.Mode.Queries[i].SQL != draft.Mode.Queries[i].SQL {
+			t.Errorf("query %d differs after a cache round-trip", i)
+		}
+	}
+	t.Logf("second call served from cache in %s (no API call)",
+		cachedOutcome.Elapsed.Round(time.Millisecond))
+
+	// And a changed input must invalidate it rather than silently reuse SQL
+	// written for a schema that no longer exists.
+	moved := req
+	moved.Portal = &Portal{Alias: inv.Alias, Host: inv.Host, Tables: append(
+		append([]Table(nil), inv.Tables...),
+		Table{Name: "a_new_table", Rows: 1, Columns: []Column{{Name: "x", Type: "INTEGER"}}},
+	)}
+	v := Peek(cfg, moved)
+	if v.State != cache.StateStale {
+		t.Errorf("a new table should have made the entry stale, got %s", v.State)
+	} else {
+		t.Logf("correctly invalidated: %s", strings.Join(v.Reasons, "; "))
+	}
 }
 
 // TestLive_RefusesCredentiallessRun pins the offline half of the contract: with

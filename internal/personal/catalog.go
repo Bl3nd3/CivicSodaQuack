@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/neomantra/CivicSodaQuack/internal/cache"
 )
 
 // Column is one column of a synced table, as DuckDB reports it.
@@ -276,6 +278,28 @@ func (p *Portal) Brief() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// Shape reduces the inventory to the parts that determine a draft, for the
+// cache fingerprint.
+//
+// It carries the sample values too. They are shown to the model when the user
+// asks for them, so a resync that changes how a category is spelled has to
+// invalidate the cached draft — the old SQL may still plan while filtering on
+// a spelling the data no longer uses, which returns zero rows that look like a
+// finding.
+func (p *Portal) Shape() []cache.TableShape {
+	out := make([]cache.TableShape, 0, len(p.Tables))
+	for _, t := range p.Tables {
+		cols := make([]cache.ColumnShape, 0, len(t.Columns))
+		for _, c := range t.Columns {
+			cols = append(cols, cache.ColumnShape{
+				Name: c.Name, Type: c.Type, Samples: c.Samples,
+			})
+		}
+		out = append(out, cache.TableShape{Name: t.Name, Rows: t.Rows, Columns: cols})
+	}
+	return out
 }
 
 // TableNames lists the local tables, for error messages that need to say what

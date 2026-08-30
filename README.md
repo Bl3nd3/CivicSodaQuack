@@ -220,6 +220,31 @@ Ask another question and the queries are **appended**. Merging is deterministic 
 
 Useful flags: `--dry-run` prints the draft without saving it, `--as <name>` builds a separate named mode instead of `personal`, `--run` executes the new queries immediately, and `--samples` also sends a few distinct values from low-cardinality text columns — which is how a generated filter learns the portal writes `STREETS & SAN` rather than `Streets and Sanitation`.
 
+#### The draft cache
+
+Drafting is the only billed step in csq, so the reply is cached. Ask the same question twice and the second time is free, offline, and instant.
+
+```bash
+./csq cache            # what is cached, how old, how often reused
+./csq cache verify     # check every entry parses, checksums, and matches its own inputs
+./csq cache show 1     # one entry's inputs and the drafted JSON
+./csq cache prune --older-than 30d
+./csq cache clear
+```
+
+**csq caches what the model drafted, never what a query returned.** A draft is code: given the same question, schema, prompt and model, it means the same thing tomorrow. A query result is *data*, and reusing one would put a figure on screen the portal may since have revised — so `csq modes run` always re-executes against DuckDB.
+
+An entry is reused only when **every** input still matches: the question, the model, the effort, csq's authoring instructions, the mode-file schema, the tables you hold (their columns, their types, and any sampled values), and the mode already on disk. Change one and the entry is reported stale *with the reason*, so you can see why you are paying for a question you already asked:
+
+```
+[csq] a draft for this question was cached 3 hours ago but no longer applies:
+        - the tables you hold changed — a column, a type, or a sampled value differs
+```
+
+Two properties follow from how it is built. A cache hit **skips the network call and nothing else** — the read-only guard, the inventory cross-check, the loader's validation and `EXPLAIN` all still run, so a cached draft is never trusted more than a fresh one. And because a hit makes no call, it needs **no API key and no confirmation**: csq checks the cache before it asks permission to contact anything.
+
+There is deliberately no expiry. A draft whose every input is unchanged is exactly as valid a year later — the fingerprint, not the clock, is what makes one stale. `prune` exists for disk hygiene and is your call. The one input the fingerprint cannot see is the model itself changing behind a stable id; `--refresh` is the escape hatch, and `--no-cache` bypasses the cache entirely.
+
 Three things worth being clear about:
 
 - **This is the only part of csq that talks to the network at analysis time**, and the only part that needs an `ANTHROPIC_API_KEY` (or a profile from `ant auth login`). Every other mode runs entirely locally. csq states what it is about to send and asks before sending it; `--yes` skips the prompt.
