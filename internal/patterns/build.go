@@ -209,6 +209,23 @@ func renderSQL(req BuildRequest, concept string) (sqlText, entity, measure strin
 	// shape instead of two that can drift apart.
 	if col, ok := req.Columns[RoleMeasure]; ok && strings.TrimSpace(col) != "" {
 		switch p.Name {
+		case topN.Name:
+			// Ranking by a summed value rather than by record count. The count
+			// stays in the output: "one contract worth $10M" and "a thousand
+			// worth $10M each" are different findings, and a total alone hides
+			// which one you are looking at.
+			sqlText = strings.Replace(sqlText,
+				"       COUNT(*) AS records",
+				"       COUNT(*)               AS records,\n"+
+					"       ROUND(SUM(measure), 2) AS total,\n"+
+					"       ROUND(AVG(measure), 2) AS average,\n"+
+					"       ROUND(MAX(measure), 2) AS largest", 1)
+			sqlText = strings.Replace(sqlText,
+				"WHERE entity IS NOT NULL",
+				"WHERE entity IS NOT NULL AND measure IS NOT NULL", 1)
+			sqlText = strings.Replace(sqlText,
+				"ORDER BY records DESC", "ORDER BY total DESC", 1)
+			entity, measure = "entity", "total"
 		case trend.Name:
 			sqlText = strings.Replace(sqlText,
 				"COUNT(*)                        AS records",

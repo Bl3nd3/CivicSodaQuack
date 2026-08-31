@@ -149,32 +149,35 @@ var topN = &Pattern{
 	Name:    "top-n",
 	Summary: "Rank entities by a summed measure",
 	About: "The commonest civic question there is: who got the most. Ranks each " +
-		"distinct value of one column by the sum of a number, with a count of the " +
-		"underlying records so a single large row is distinguishable from many small ones.",
+		"distinct value of one column, by how many records it has, or by the sum of " +
+		"a number when you name one. Both readings of 'the most' are ordinary — the " +
+		"most permits is a count, the most money is a sum — so the measure is " +
+		"optional and the ranking follows whichever you asked for.",
 	Params: []Param{
 		{Role: RoleEntity, Flag: "--entity", Desc: "Column naming the thing being ranked (a vendor, a department)", Required: true},
-		{Role: RoleMeasure, Flag: "--measure", Desc: "Numeric column to sum (an amount, a total)", Required: true, Numeric: true},
+		{Role: RoleMeasure, Flag: "--measure", Desc: "Optional numeric column to sum; without one, rows are counted", Numeric: true},
 	},
 	Entity:  "entity",
-	Measure: "total",
+	Measure: "records",
 	SQL: `
 SELECT entity,
-       COUNT(*)               AS records,
-       ROUND(SUM(measure), 2) AS total,
-       ROUND(AVG(measure), 2) AS average,
-       ROUND(MAX(measure), 2) AS largest
+       COUNT(*) AS records
 FROM ` + ConceptToken + `
-WHERE entity IS NOT NULL AND measure IS NOT NULL
+WHERE entity IS NOT NULL
 GROUP BY entity
-ORDER BY total DESC
+ORDER BY records DESC
 LIMIT 25`,
 	Caveats: []string{
 		"A top-25 ranking hides its tail. The rows not shown may hold most of the " +
 			"total, so never describe the leaders as 'most of' anything without checking " +
 			"what the full distribution looks like.",
-		"Rows where the ranked column or the measure is NULL are excluded entirely. " +
-			"The confidence block reports how many that was; if it is a large share, the " +
-			"ranking describes a subset you have not characterised.",
+		"Rows where the ranked column is NULL are excluded, and so are rows missing " +
+			"the summed column when one is used. The confidence block reports how many " +
+			"that was; if it is a large share, the ranking describes a subset you have " +
+			"not characterised.",
+		"Counting records and summing a value answer different questions. The vendor " +
+			"with the most contracts is often not the one paid the most, and which of " +
+			"those you meant by 'the most' is not something the data settles.",
 		"Entity names in civic data are free text and are rarely deduplicated upstream. " +
 			"One organisation appearing as 'ACME INC', 'Acme, Inc.' and 'Acme Incorporated' " +
 			"is split across three rows, which understates its true total. Run the " +

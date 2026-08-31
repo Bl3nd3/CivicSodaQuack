@@ -217,12 +217,59 @@ func TestBuild_RejectsUnknownColumn(t *testing.T) {
 }
 
 func TestBuild_RequiresRequiredRoles(t *testing.T) {
-	_, err := Build(buildReq("top-n", map[Role]string{RoleEntity: "vendor_nm"}))
+	// concentration needs all three; omitting the measure must be refused.
+	_, err := Build(buildReq("concentration", map[Role]string{
+		RoleGroup: "dept", RoleEntity: "vendor_nm",
+	}))
 	if err == nil {
 		t.Fatal("a missing required role should be refused")
 	}
 	if !strings.Contains(err.Error(), "--measure") {
 		t.Errorf("the error should name the missing flag: %v", err)
+	}
+}
+
+// top-n without a measure ranks by record count — "the most permits" is as
+// ordinary a question as "the most money", and forcing a sum on it is what made
+// the router reach for meaningless numeric columns.
+func TestBuild_TopNCountsWithoutAMeasure(t *testing.T) {
+	draft, err := Build(buildReq("top-n", map[Role]string{RoleEntity: "vendor_nm"}))
+	if err != nil {
+		t.Fatalf("top-n should build without a measure: %v", err)
+	}
+	q := draft.Mode.Queries[0]
+	if !strings.Contains(q.SQL, "COUNT(*)") {
+		t.Errorf("expected a count ranking:\n%s", q.SQL)
+	}
+	if strings.Contains(q.SQL, "SUM(measure)") {
+		t.Errorf("no measure was given, so nothing should be summed:\n%s", q.SQL)
+	}
+	if q.Measure != "records" {
+		t.Errorf("the concentration reading should follow the count, got %q", q.Measure)
+	}
+	if _, ok := draft.Binding.Datasets["contracts"].Columns["measure"]; ok {
+		t.Error("no measure column should be mapped")
+	}
+}
+
+func TestBuild_TopNSumsWhenGivenAMeasure(t *testing.T) {
+	draft, err := Build(buildReq("top-n", map[Role]string{
+		RoleEntity: "vendor_nm", RoleMeasure: "paid",
+	}))
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	q := draft.Mode.Queries[0]
+	if !strings.Contains(q.SQL, "SUM(measure)") || !strings.Contains(q.SQL, "ORDER BY total DESC") {
+		t.Errorf("expected a summed ranking:\n%s", q.SQL)
+	}
+	// The record count stays: one contract worth $10M and a thousand worth
+	// $10M each are different findings.
+	if !strings.Contains(q.SQL, "COUNT(*)") {
+		t.Errorf("the record count should remain alongside the total:\n%s", q.SQL)
+	}
+	if q.Measure != "total" {
+		t.Errorf("measure = %q, want total", q.Measure)
 	}
 }
 

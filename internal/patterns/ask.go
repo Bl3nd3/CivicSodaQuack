@@ -64,7 +64,7 @@ func Suggest(question string, inv *personal.Portal, preferTable string) (*Sugges
 		return nil, fmt.Errorf("this database holds no tables to ask about")
 	}
 
-	p, patternWhy, alts, err := choosePattern(terms)
+	p, patternWhy, alts, err := choosePattern(questionTerms(question))
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,15 @@ func Suggest(question string, inv *personal.Portal, preferTable string) (*Sugges
 	// by itself is always a mistake, and it is an easy one for a scorer to make
 	// when one column happens to look good for two roles.
 	used := map[string]bool{}
+	wantsQuantity := asksForAQuantity(terms)
 	for _, param := range p.Params {
+		// "the most permits" and "the most money" are both ordinary readings of
+		// "the most", and they are different questions. Attach a summed measure
+		// only when the question actually reaches for one; otherwise rank by
+		// record count, which is what was asked.
+		if param.Role == RoleMeasure && !param.Required && !wantsQuantity {
+			continue
+		}
 		col, why, ok := chooseColumn(terms, table, param, used)
 		if !ok {
 			if param.Required {
@@ -177,9 +185,10 @@ func chooseTable(terms []string, inv *personal.Portal, prefer string, p *Pattern
 	}
 
 	type scored struct {
-		t      personal.Table
-		score  float64
-		reason string
+		t       personal.Table
+		score   float64
+		reason  string
+		canFill bool
 	}
 	var ranked []scored
 
@@ -187,8 +196,11 @@ func chooseTable(terms []string, inv *personal.Portal, prefer string, p *Pattern
 		var score float64
 		var reason string
 
+		// A table the question names outright outranks one that merely holds a
+		// column sharing a word. "How has 311 volume changed over the years"
+		// names requests_311; crimes only happens to have a `year` column.
 		if s, hit := scoreKeywords(terms, tokenise(t.Name+" "+t.DatasetName)); s > 0 {
-			score += s * 2
+			score += s * 4
 			reason = fmt.Sprintf("its name matches %q", hit)
 		}
 		if s, hit := scoreKeywords(terms, tokenise(t.Description)); s > 0 {
@@ -212,14 +224,10 @@ func chooseTable(terms []string, inv *personal.Portal, prefer string, p *Pattern
 				reason = fmt.Sprintf("it has a column matching %q", colHit)
 			}
 		}
-		// A table that cannot supply a required role is not a candidate at all.
-		if !canFillRequired(t, p) {
-			continue
-		}
 		if score <= 0 {
 			continue
 		}
-		ranked = append(ranked, scored{t, score, reason})
+		ranked = append(ranked, scored{t, score, reason, canFillRequired(t, p)})
 	}
 
 	if len(ranked) == 0 {
@@ -229,6 +237,32 @@ func chooseTable(terms []string, inv *personal.Portal, prefer string, p *Pattern
 			strings.Join(inv.TableNames(), ", "))
 	}
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+
+	// The table the question is plainly about takes precedence over whether it
+	// can answer. Quietly moving to a different table because the obvious one
+	// lacks a column is the worst outcome available here: "is any crime type
+	// concentrated in one district" would come back describing *building
+	// permits*, correctly labelled and completely beside the point.
+	if !ranked[0].canFill {
+		var missing []string
+		for _, param := range p.Params {
+			if !param.Required {
+				continue
+			}
+			used := map[string]bool{}
+			if _, _, ok := chooseColumn(nil, ranked[0].t, param, used); !ok {
+				missing = append(missing, string(param.Role))
+			}
+		}
+		return personal.Table{}, "", fmt.Errorf(
+			"this question is about %q, but that table has no column that looks like "+
+				"a %s, which the %s pattern needs.\n"+
+				"  Name the column yourself:\n    csq modes add %s --db <file> --table %s ...\n"+
+				"  Or ask something %q can answer — 'csq modes tables' lists its columns.",
+			ranked[0].t.Name, strings.Join(missing, " or a "), p.Name,
+			p.Name, ranked[0].t.Name, ranked[0].t.Name)
+	}
+
 	if len(ranked) > 1 && ranked[0].score == ranked[1].score {
 		return personal.Table{}, "", fmt.Errorf(
 			"this question fits %q and %q equally well.\n  Name one with --table.",
@@ -273,8 +307,17 @@ func chooseColumn(terms []string, t personal.Table, param Param, used map[string
 		if used[strings.ToLower(c.Name)] {
 			continue
 		}
-		score, reason, roleMatched := scoreColumnForRole(terms, c, param)
+		score, reason, roleMatched := scoreColumnForRole(terms, c, param, t.Name)
 		if score <= 0 {
+			continue
+		}
+		// A measure is summed, and summing the wrong column is the one mistake
+		// here that produces a real-looking number rather than an error. Chicago
+		// offers three ways to make it: crimes.id, crimes.ward and
+		// requests_311.community_area are all numeric and all meaningless to
+		// add up. So a measure must *look* like a quantity — being numeric is
+		// never enough on its own, whichever role required it.
+		if param.Role == RoleMeasure && !roleMatched {
 			continue
 		}
 		// An optional role must be *earned* by looking like that role, never
@@ -307,7 +350,7 @@ func chooseColumn(terms []string, t personal.Table, param Param, used map[string
 // has fbi_code, and a question mentioning "type" reaches it through the
 // category synonyms, at which point a classification code is summed into a
 // total that looks like a real number and means nothing.
-func scoreColumnForRole(terms []string, c personal.Column, param Param) (score float64, reason string, roleMatched bool) {
+func scoreColumnForRole(terms []string, c personal.Column, param Param, tableName string) (score float64, reason string, roleMatched bool) {
 	name := tokeniseIdent(c.Name)
 
 	// Type evidence first: it either qualifies the column or rules it out.
@@ -333,12 +376,26 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (score f
 			return 0, "", false
 		}
 	default:
+		// Ranking or grouping by a raw timestamp gives one row per distinct
+		// instant, which answers nothing. "When do most crimes happen" reaches
+		// the date column through the synonym table and would otherwise rank
+		// 2.9M timestamps against each other.
+		if isTemporalType(c.Type) {
+			return 0, "", false
+		}
 		// Entity, category and group are all text-shaped.
-		if isTextType(c.Type) {
+		switch {
+		case isTextType(c.Type):
 			score += 1
-		} else if isNumericType(c.Type) || isTemporalType(c.Type) {
-			// A number can name a thing (a badge, a ward), but rarely.
+		case isNumericType(c.Type):
+			// A number can name a thing — a ward, a district, a badge.
 			score += 0.1
+		default:
+			// A boolean splits everything into two rows. That is not a ranking
+			// and not a category worth naming; crimes.arrest reaches this role
+			// through the synonyms for "crime" and would otherwise win by
+			// default on a table with no better candidate.
+			return 0, "", false
 		}
 	}
 
@@ -352,12 +409,29 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (score f
 	// Name evidence against the user's own words, expanded through the civic
 	// synonym table. This is what makes "money" land on award_amount.
 	if len(terms) > 0 {
-		if s, hit := scoreKeywords(expand(terms), name); s > 0 {
-			score += s * 2.5
+		// A word the user actually typed outranks one reached through the
+		// synonym table, which in turn outranks the generic role vocabulary.
+		// Without that ordering, "which wards have the most 311 requests" lands
+		// on `precinct` — a synonym of ward — over the `ward` column itself.
+		if s, hit := scoreKeywords(terms, name); s > 0 {
+			score += s * 5
+			if !roleMatched {
+				reason = fmt.Sprintf("you said %q", hit)
+			}
+		} else if s, hit := scoreKeywords(expand(terms), name); s > 0 {
+			score += s * 3
 			if !roleMatched {
 				reason = fmt.Sprintf("matched %q in your question", hit)
 			}
 		}
+	}
+
+	// A column named after its own table is that table's identifier, not a
+	// description of anything: building_permits.permit_ holds a permit number.
+	// Ranking by one produces a row per record, which is never the answer to
+	// "who did the most".
+	if param.Role == RoleEntity && subsetOf(name, tokeniseIdent(tableName)) {
+		score -= 4
 	}
 
 	// Among candidates matching equally well, prefer the least qualified name.
@@ -373,6 +447,17 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (score f
 		reason = fmt.Sprintf("best remaining %s candidate", param.Role)
 	}
 	return score, reason, roleMatched
+}
+
+// asksForAQuantity reports whether the question reaches for a number to add up,
+// rather than for a count of records.
+//
+// It is the difference between "which contractors pulled the most permits"
+// (count) and "which contractors were paid the most" (sum), and the data cannot
+// settle which was meant — only the wording can.
+func asksForAQuantity(terms []string) bool {
+	s, _ := scoreKeywords(expand(terms), roleKeywords[RoleMeasure])
+	return s > 0
 }
 
 // warningsFor flags a question asking for something the chosen shape does not
@@ -413,7 +498,10 @@ func scoreKeywords(terms []string, vocab []string) (float64, string) {
 	for _, t := range terms {
 		set[t] = true
 	}
-	// Bigrams let a vocabulary contain phrases.
+	// Bigrams let a vocabulary contain phrases. They are built here from
+	// already-filtered terms, so a phrase whose words are adjacent survives;
+	// phrases separated by a dropped stopword are handled by questionTerms,
+	// which builds its bigrams before filtering.
 	for i := 0; i+1 < len(terms); i++ {
 		set[terms[i]+" "+terms[i+1]] = true
 	}
@@ -439,6 +527,23 @@ func scoreKeywords(terms []string, vocab []string) (float64, string) {
 	return total, bestTerm
 }
 
+// subsetOf reports whether every token of a appears in b.
+func subsetOf(a, b []string) bool {
+	if len(a) == 0 {
+		return false
+	}
+	set := make(map[string]bool, len(b))
+	for _, x := range b {
+		set[x] = true
+	}
+	for _, x := range a {
+		if !set[x] {
+			return false
+		}
+	}
+	return true
+}
+
 var stopwords = map[string]bool{
 	"the": true, "a": true, "an": true, "of": true, "in": true, "on": true,
 	"for": true, "to": true, "and": true, "or": true, "is": true, "are": true,
@@ -450,6 +555,40 @@ var stopwords = map[string]bool{
 	"by": true, "from": true, "at": true, "as": true, "be": true, "been": true,
 	"has": true, "have": true, "had": true, "can": true, "could": true,
 	"would": true, "should": true, "any": true, "all": true, "each": true,
+}
+
+// questionTerms is what a question is matched against: its content words, plus
+// bigrams built *before* stopwords were dropped.
+//
+// Building bigrams after filtering silently breaks every vocabulary phrase
+// containing a stopword — "by month", "by year", "what kind", "how many of" —
+// because the connecting word is gone by the time pairs are formed. That was
+// costing real questions: "show me permits by month" and "arrests by year" both
+// matched nothing at all and were refused.
+func questionTerms(s string) []string {
+	raw := splitWords(s)
+	out := make([]string, 0, len(raw)*2)
+	for _, w := range raw {
+		if !stopwords[w] {
+			out = append(out, singular(w))
+		}
+	}
+	for i := 0; i+1 < len(raw); i++ {
+		out = append(out, raw[i]+" "+raw[i+1])
+		// Also the singularised pair, so "by years" reaches "by year".
+		if p := raw[i] + " " + singular(raw[i+1]); p != raw[i]+" "+raw[i+1] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// splitWords lowercases and splits on anything that is not a letter or digit,
+// keeping stopwords and original order.
+func splitWords(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
+	})
 }
 
 // tokenise lowercases, splits on anything that is not a letter or digit, drops
@@ -522,14 +661,18 @@ var synonyms = map[string][]string{
 	"worth":    {"amount", "amt", "value", "total"},
 	"award":    {"award", "amount", "amt", "total"},
 
-	"vendor":     {"vendor", "supplier", "contractor", "company", "firm", "payee", "business"},
+	"vendor": {"vendor", "supplier", "contractor", "company", "firm", "payee", "business", "contact"},
+	// Chicago files the permit holder under contact_1_name, which no plain
+	// English word reaches without this.
+	"contact":    {"contact", "vendor", "applicant", "owner"},
 	"supplier":   {"vendor", "supplier", "contractor", "company"},
-	"contractor": {"contractor", "vendor", "company", "firm"},
+	"contractor": {"contractor", "vendor", "company", "firm", "contact", "applicant"},
 	"company":    {"company", "vendor", "firm", "business", "corporation"},
 	"firm":       {"firm", "company", "vendor"},
 	"business":   {"business", "company", "vendor"},
 	"lobbyist":   {"lobbyist", "lobby", "registrant"},
 	"recipient":  {"recipient", "payee"},
+	"payer":      {"payer", "payee", "contact", "applicant", "owner", "vendor"},
 	"employee":   {"employee", "title", "position"},
 	"officer":    {"officer", "badge", "star", "member"},
 
@@ -539,9 +682,12 @@ var synonyms = map[string][]string{
 	"ward":         {"ward", "district", "precinct", "beat", "area"},
 	"district":     {"district", "ward", "precinct", "area", "borough"},
 	"neighborhood": {"neighborhood", "community", "area", "district", "ward"},
-	"community":    {"community", "neighborhood", "area", "district"},
-	"borough":      {"borough", "district", "area"},
-	"zip":          {"zip", "postal", "zipcode"},
+	// In 311 data a "complaint" is a service-request type, which is why this
+	// reaches "type": Chicago files it as sr_type.
+	"complaint": {"complaint", "case", "allegation", "incident", "sr", "service", "request", "type"},
+	"community": {"community", "neighborhood", "area", "district"},
+	"borough":   {"borough", "district", "area"},
+	"zip":       {"zip", "postal", "zipcode"},
 
 	"date":  {"date", "time", "day", "issued", "awarded", "filed", "created", "start"},
 	"when":  {"date", "time", "issued", "awarded", "filed", "created"},
@@ -555,11 +701,10 @@ var synonyms = map[string][]string{
 	"status":   {"status", "state", "disposition", "outcome", "result"},
 	"outcome":  {"outcome", "status", "disposition", "finding", "result"},
 
-	"permit":    {"permit", "license", "application"},
-	"complaint": {"complaint", "case", "allegation", "incident"},
-	"crime":     {"crime", "offense", "offence", "incident", "arrest"},
-	"contract":  {"contract", "award", "procurement", "purchase"},
-	"request":   {"request", "service", "ticket", "case"},
+	"permit":   {"permit", "license", "application"},
+	"crime":    {"crime", "offense", "offence", "incident", "arrest"},
+	"contract": {"contract", "award", "procurement", "purchase"},
+	"request":  {"request", "service", "ticket", "case"},
 }
 
 // patternKeywords is the vocabulary that routes a question to a shape. Phrases
@@ -580,6 +725,9 @@ var patternKeywords = map[string][]string{
 		"annual", "growing", "growth", "rising", "rise", "falling", "fall", "decline",
 		"increase", "increasing", "decrease", "decreasing", "history", "historical",
 		"seasonal", "each month", "per month", "per year", "changed over",
+		// "When do most crimes happen" reads as a ranking because of "most",
+		// but what it wants is a distribution over time.
+		"when do", "when are", "when is", "when did", "what time", "time of",
 	},
 	"breakdown": {
 		"breakdown", "break down", "distribution", "split", "composition",

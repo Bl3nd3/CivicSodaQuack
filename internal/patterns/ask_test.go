@@ -245,15 +245,116 @@ func TestSuggest_PrefersTheLeastQualifiedName(t *testing.T) {
 	}
 }
 
-// The tightening above must not stop a genuinely measure-shaped column from
-// filling an optional role.
-func TestSuggest_OptionalRoleStillFillsOnRealEvidence(t *testing.T) {
-	s, err := Suggest("how are permits trending over time?", inventory(), "")
+// "The most permits" and "the most money" are both ordinary readings of "the
+// most", and they are different questions. A summed measure is attached only
+// when the wording reaches for a quantity; otherwise records are counted, which
+// is what was asked.
+func TestSuggest_CountsUnlessTheQuestionAsksForAQuantity(t *testing.T) {
+	counting := []string{
+		"how are permits trending over time?",
+		"which applicants pull the most permits?",
+	}
+	for _, q := range counting {
+		s, err := Suggest(q, inventory(), "")
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if col, ok := s.Columns[RoleMeasure]; ok {
+			t.Errorf("%s: attached measure %q, but the question asks for a count", q, col)
+		}
+	}
+
+	summing := map[string]string{
+		"which applicants pull the most permits by value?": "estimated_cost",
+		"which applicants paid the most in permit costs?":  "estimated_cost",
+	}
+	for q, want := range summing {
+		s, err := Suggest(q, inventory(), "")
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if s.Columns[RoleMeasure] != want {
+			t.Errorf("%s: measure = %q, want %q", q, s.Columns[RoleMeasure], want)
+		}
+	}
+}
+
+// Ranking or grouping by a raw timestamp yields one row per instant, and a
+// boolean yields two. Neither is an answer, and both are reachable through the
+// synonym table on Chicago's crimes schema.
+func TestSuggest_RejectsTimestampAndBooleanEntities(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{{
+			Name: "crimes", DatasetName: "Crimes",
+			Columns: []personal.Column{
+				{Name: "date", Type: "TIMESTAMP"},
+				{Name: "arrest", Type: "BOOLEAN"},
+				{Name: "primary_type", Type: "VARCHAR"},
+			},
+		}},
+	}
+	s, err := Suggest("what are the top crime types?", inv, "")
 	if err != nil {
 		t.Fatalf("suggest: %v", err)
 	}
-	if s.Columns[RoleMeasure] != "estimated_cost" {
-		t.Errorf("measure = %q, want estimated_cost", s.Columns[RoleMeasure])
+	switch s.Columns[RoleEntity] {
+	case "date", "arrest":
+		t.Errorf("entity = %q — ranking by that answers nothing", s.Columns[RoleEntity])
+	}
+}
+
+// Silently moving to a different table because the obvious one lacks a column
+// is the worst outcome available: a question about crimes coming back about
+// building permits, correctly labelled and entirely beside the point.
+func TestSuggest_RefusesRatherThanSwitchingTables(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{
+			{
+				Name: "crimes", DatasetName: "Crimes",
+				Columns: []personal.Column{
+					{Name: "primary_type", Type: "VARCHAR"},
+					{Name: "district", Type: "VARCHAR"},
+				}, // no measure-shaped column at all
+			},
+			{
+				Name: "building_permits", DatasetName: "Building Permits",
+				Columns: []personal.Column{
+					{Name: "permit_type", Type: "VARCHAR"},
+					{Name: "total_fee", Type: "DOUBLE"},
+				},
+			},
+		},
+	}
+	_, err := Suggest("is any single crime type concentrated in one district?", inv, "")
+	if err == nil {
+		t.Fatal("expected a refusal rather than a switch to building_permits")
+	}
+	if !strings.Contains(err.Error(), "crimes") {
+		t.Errorf("the refusal should name the table the question was about: %v", err)
+	}
+	if strings.Contains(err.Error(), "building_permits") {
+		t.Errorf("the refusal should not offer an unrelated table: %v", err)
+	}
+}
+
+// Vocabulary phrases containing a stopword — "by month", "what kind" — must
+// still match. Building bigrams after stopword removal silently broke every one
+// of them, and these questions matched nothing at all.
+func TestSuggest_PhrasesSurviveStopwords(t *testing.T) {
+	cases := map[string]string{
+		"show me permits by month":          "trend",
+		"what kinds of permits are issued?": "breakdown",
+	}
+	for q, want := range cases {
+		s, err := Suggest(q, inventory(), "")
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if s.Pattern.Name != want {
+			t.Errorf("%s: pattern = %q, want %q", q, s.Pattern.Name, want)
+		}
 	}
 }
 
