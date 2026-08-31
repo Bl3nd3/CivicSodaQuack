@@ -292,7 +292,7 @@ func TestCache_ServesADraftOfflineWithNoClient(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	fp := Fingerprint(req, cfg, systemPrompt(), draftSchema())
-	if _, err := store.Put(fp, req.Question, payload); err != nil {
+	if _, err := store.Put(fp, req.Question, payload, cache.Cost{}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -348,7 +348,7 @@ func TestCache_SchemaChangeInvalidatesTheDraft(t *testing.T) {
 	}
 	payload, _ := json.Marshal(draftFor("cache-test"))
 	fp := Fingerprint(req, cfg, systemPrompt(), draftSchema())
-	if _, err := store.Put(fp, req.Question, payload); err != nil {
+	if _, err := store.Put(fp, req.Question, payload, cache.Cost{}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 

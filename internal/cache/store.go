@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -49,6 +50,13 @@ type Entry struct {
 	// Question is kept in readable form for `csq cache list`; the fingerprint
 	// holds only its normalised form.
 	Question string `json:"question"`
+
+	// InputTokens and OutputTokens are what the call that produced this entry
+	// cost. They are recorded so a hit's saving can be stated as a number
+	// rather than asserted — and so the store can be sized against something
+	// real. A cache nobody can measure is a cache nobody can tune.
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
 
 	// path is where this entry was read from. Not serialised.
 	path string
@@ -175,17 +183,19 @@ func (s *Store) Lookup(f Fingerprint) Verdict {
 // The write is atomic: a temporary file renamed into place, so an interrupted
 // write leaves the previous entry intact rather than a truncated one. Rename
 // within a directory is atomic on every platform csq targets.
-func (s *Store) Put(f Fingerprint, question string, payload []byte) (*Entry, error) {
+func (s *Store) Put(f Fingerprint, question string, payload []byte, cost Cost) (*Entry, error) {
 	now := time.Now().UTC()
 	e := &Entry{
-		Slot:        f.Slot(),
-		Key:         f.Key(),
-		Fingerprint: f,
-		CreatedAt:   now,
-		LastUsedAt:  now,
-		Checksum:    checksum(string(payload)),
-		Payload:     string(payload),
-		Question:    strings.TrimSpace(question),
+		Slot:         f.Slot(),
+		Key:          f.Key(),
+		Fingerprint:  f,
+		CreatedAt:    now,
+		LastUsedAt:   now,
+		Checksum:     checksum(string(payload)),
+		Payload:      string(payload),
+		Question:     strings.TrimSpace(question),
+		InputTokens:  cost.InputTokens,
+		OutputTokens: cost.OutputTokens,
 	}
 
 	body, err := json.MarshalIndent(e, "", "  ")
@@ -217,7 +227,102 @@ func (s *Store) Put(f Fingerprint, question string, payload []byte) (*Entry, err
 		return nil, fmt.Errorf("cache: install %s: %w", final, err)
 	}
 	e.path = final
+
+	// Bound the store on the way out, not on a schedule. A cache that only
+	// shrinks when someone remembers to prune it is one that grows without
+	// limit in practice, and the moment a new entry lands is exactly when its
+	// size is known to have changed.
+	if _, err := s.Enforce(DefaultLimits()); err != nil {
+		// Failing to evict is not a reason to lose the draft that was just
+		// written; the store is merely larger than intended.
+		return e, nil
+	}
 	return e, nil
+}
+
+// Cost is what one model call cost, recorded on the entry it produced.
+type Cost struct {
+	InputTokens  int64
+	OutputTokens int64
+}
+
+// Limits bound how large the store may grow.
+//
+// Both are ceilings rather than targets: eviction runs only when one is
+// exceeded. Zero means unbounded on that axis.
+type Limits struct {
+	MaxEntries int
+	MaxBytes   int64
+}
+
+// Default bounds. A drafted mode is a few kilobytes, so 200 entries is a long
+// working history and still well under a megabyte in practice; the byte ceiling
+// exists for the pathological case of a very large draft rather than for the
+// ordinary one.
+const (
+	defaultMaxEntries = 200
+	defaultMaxBytes   = 32 << 20 // 32 MiB
+)
+
+// DefaultLimits reads the bounds from the environment, falling back to the
+// defaults above. CSQ_CACHE_MAX_ENTRIES or CSQ_CACHE_MAX_BYTES set to 0 removes
+// that ceiling.
+func DefaultLimits() Limits {
+	return Limits{
+		MaxEntries: envInt("CSQ_CACHE_MAX_ENTRIES", defaultMaxEntries),
+		MaxBytes:   int64(envInt("CSQ_CACHE_MAX_BYTES", defaultMaxBytes)),
+	}
+}
+
+func envInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return fallback
+	}
+	return n
+}
+
+// Enforce evicts entries until the store fits within limits, and reports how
+// many went.
+//
+// Least-recently-used first. The entry a user keeps reusing is the one whose
+// re-drafting would cost them most, so recency of use is a better proxy for
+// value here than age: a draft written months ago and used yesterday is worth
+// more than one written yesterday and never used again.
+func (s *Store) Enforce(limits Limits) (int, error) {
+	if limits.MaxEntries <= 0 && limits.MaxBytes <= 0 {
+		return 0, nil
+	}
+	entries, _ := s.List() // already newest-use-first
+
+	var total int64
+	sizes := make(map[string]int64, len(entries))
+	for _, e := range entries {
+		if fi, err := os.Stat(s.pathFor(e.Slot)); err == nil {
+			sizes[e.Slot] = fi.Size()
+			total += fi.Size()
+		}
+	}
+
+	var evicted int
+	for i := len(entries) - 1; i >= 0; i-- {
+		overCount := limits.MaxEntries > 0 && len(entries)-evicted > limits.MaxEntries
+		overBytes := limits.MaxBytes > 0 && total > limits.MaxBytes
+		if !overCount && !overBytes {
+			break
+		}
+		e := entries[i]
+		if err := os.Remove(s.pathFor(e.Slot)); err != nil && !os.IsNotExist(err) {
+			return evicted, err
+		}
+		total -= sizes[e.Slot]
+		evicted++
+	}
+	return evicted, nil
 }
 
 // Touch records a use of an entry. A failure is not worth failing the command
@@ -370,15 +475,29 @@ type Stats struct {
 	Oldest   time.Time
 	Newest   time.Time
 	Problems int
+
+	// TokensStored is what it cost to produce everything currently held.
+	TokensStored int64
+	// TokensSaved is what reuse avoided: each entry's own cost, once per hit.
+	// It is the number that says whether the cache is earning its disk.
+	TokensSaved int64
+	// Limits are the ceilings in force, for reporting headroom.
+	Limits Limits
 }
 
 // Stats reports the store's size and use.
 func (s *Store) Stats() (Stats, error) {
 	entries, problems := s.List()
-	st := Stats{Entries: len(entries), Problems: len(problems)}
+	st := Stats{Entries: len(entries), Problems: len(problems), Limits: DefaultLimits()}
 
 	for _, e := range entries {
 		st.Hits += e.Hits
+		cost := e.InputTokens + e.OutputTokens
+		st.TokensStored += cost
+		// Each hit avoided re-paying this entry's own cost. Entries written
+		// before token accounting existed contribute nothing, which understates
+		// the saving rather than inventing one.
+		st.TokensSaved += cost * int64(e.Hits)
 		if fi, err := os.Stat(s.pathFor(e.Slot)); err == nil {
 			st.Bytes += fi.Size()
 		}

@@ -158,13 +158,36 @@ type JSONRequest struct {
 	Schema map[string]any
 }
 
+// Usage is what one call cost, as the API reported it.
+//
+// It is carried back so the cache can record it, which is the only way the
+// saving from a cache hit can be stated as a number rather than asserted. A
+// cache nobody can measure is a cache nobody can size.
+type Usage struct {
+	InputTokens  int64 `json:"input_tokens"`
+	OutputTokens int64 `json:"output_tokens"`
+	// CacheReadTokens is Anthropic's own prompt cache, which is a different
+	// mechanism from csq's draft cache: it discounts the repeated system prompt
+	// within a session, where the draft cache skips the request entirely.
+	CacheReadTokens int64 `json:"cache_read_tokens,omitempty"`
+}
+
+// Total is the tokens billed for one call, ignoring the prompt-cache discount.
+func (u Usage) Total() int64 { return u.InputTokens + u.OutputTokens }
+
+// Result is one model reply and what it cost.
+type Result struct {
+	Bytes []byte
+	Usage Usage
+}
+
 // JSON asks the model for a single JSON document matching req.Schema.
 //
 // The request streams. That is not for display — nothing is shown as it
 // arrives — but because a long structured response on a non-streaming request
 // can exceed the SDK's HTTP timeout, and a timeout here costs the whole
 // authoring run.
-func (c *Client) JSON(ctx context.Context, req JSONRequest) ([]byte, error) {
+func (c *Client) JSON(ctx context.Context, req JSONRequest) (*Result, error) {
 	if len(req.Schema) == 0 {
 		return nil, fmt.Errorf("llm: JSON requires a schema")
 	}
@@ -228,7 +251,14 @@ func (c *Client) JSON(ctx context.Context, req JSONRequest) ([]byte, error) {
 	if !json.Valid([]byte(out)) {
 		return nil, fmt.Errorf("llm: the model returned content that is not JSON")
 	}
-	return []byte(out), nil
+	return &Result{
+		Bytes: []byte(out),
+		Usage: Usage{
+			InputTokens:     msg.Usage.InputTokens,
+			OutputTokens:    msg.Usage.OutputTokens,
+			CacheReadTokens: msg.Usage.CacheReadInputTokens,
+		},
+	}, nil
 }
 
 func refusalDetail(msg anthropic.Message) string {

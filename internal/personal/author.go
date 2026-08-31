@@ -95,6 +95,8 @@ type Outcome struct {
 	Verdict cache.Verdict
 	// Cached reports that the draft came from the store rather than the API.
 	Cached bool
+	// Usage is what the call cost, or what a hit avoided paying.
+	Usage llm.Usage
 	// Elapsed is how long obtaining the draft took.
 	Elapsed time.Duration
 }
@@ -220,6 +222,10 @@ func Author(ctx context.Context, c *llm.Client, cfg llm.Config, req Request) (*D
 	if out.Verdict.Hit() && !req.Refresh {
 		raw = []byte(out.Verdict.Entry.Payload)
 		out.Cached = true
+		out.Usage = llm.Usage{
+			InputTokens:  out.Verdict.Entry.InputTokens,
+			OutputTokens: out.Verdict.Entry.OutputTokens,
+		}
 		_ = req.Cache.Touch(out.Verdict.Entry)
 	} else {
 		if c == nil {
@@ -227,16 +233,21 @@ func Author(ctx context.Context, c *llm.Client, cfg llm.Config, req Request) (*D
 				"a model call is needed but no client was configured (the cached draft "+
 					"was %s)", out.Verdict.State)
 		}
-		var err error
-		raw, err = c.JSON(ctx, llm.JSONRequest{System: system, User: user, Schema: schema})
+		res, err := c.JSON(ctx, llm.JSONRequest{System: system, User: user, Schema: schema})
 		if err != nil {
 			return nil, out, err
 		}
+		raw = res.Bytes
+		out.Usage = res.Usage
 		if req.Cache != nil {
 			// A cache that cannot be written is a slower csq, not a broken one.
 			// The draft is in hand and the user asked for a mode, not for a
 			// cache write, so this failure must not lose them the answer.
-			if _, err := req.Cache.Put(fp, req.Question, raw); err != nil {
+			cost := cache.Cost{
+				InputTokens:  res.Usage.InputTokens,
+				OutputTokens: res.Usage.OutputTokens,
+			}
+			if _, err := req.Cache.Put(fp, req.Question, raw, cost); err != nil {
 				out.Verdict.Reasons = append(out.Verdict.Reasons,
 					fmt.Sprintf("the draft could not be cached: %v", err))
 			}

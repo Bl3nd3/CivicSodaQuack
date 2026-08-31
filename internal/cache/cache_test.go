@@ -4,6 +4,7 @@ package cache
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +63,8 @@ func TestPutThenLookup_Hits(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
 
-	if _, err := s.Put(f, "Which vendors got the most money?", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "Which vendors got the most money?", []byte(payload),
+		Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	v := s.Lookup(f)
@@ -101,7 +103,7 @@ func TestLookup_EveryRelevantInputInvalidates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newStore(t)
 			f := baseFingerprint()
-			if _, err := s.Put(f, "q", []byte(payload)); err != nil {
+			if _, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 				t.Fatalf("put: %v", err)
 			}
 
@@ -127,7 +129,7 @@ func TestLookup_EveryRelevantInputInvalidates(t *testing.T) {
 func TestLookup_DifferentQuestionMisses(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	if _, err := s.Put(f, "q", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -203,7 +205,7 @@ func TestInventoryDigest_NoticesSampleChange(t *testing.T) {
 func TestLookup_ChecksumMismatchIsCorrupt(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	e, err := s.Put(f, "q", []byte(payload))
+	e, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500})
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -235,7 +237,7 @@ func TestLookup_ChecksumMismatchIsCorrupt(t *testing.T) {
 func TestLookup_UnparseableFileIsCorruptNotAHit(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	if _, err := s.Put(f, "q", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	path := filepath.Join(s.Dir(), f.Slot()+".json")
@@ -250,7 +252,7 @@ func TestLookup_UnparseableFileIsCorruptNotAHit(t *testing.T) {
 func TestVerify_ReportsSelfInconsistentEntry(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	e, err := s.Put(f, "q", []byte(payload))
+	e, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500})
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -282,7 +284,7 @@ func TestVerify_ReportsSelfInconsistentEntry(t *testing.T) {
 func TestVerify_CleanStorePasses(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	if _, err := s.Put(f, "q", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	ok, problems := s.Verify()
@@ -295,12 +297,12 @@ func TestVerify_CleanStorePasses(t *testing.T) {
 func TestPut_ReplacesTheSameQuestion(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	if _, err := s.Put(f, "q", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	changed := f
 	changed.Model = "claude-sonnet-5"
-	if _, err := s.Put(changed, "q", []byte(`{"mode":{},"binding":{}}`)); err != nil {
+	if _, err := s.Put(changed, "q", []byte(`{"mode":{},"binding":{}}`), Cost{}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -320,7 +322,7 @@ func TestPut_ReplacesTheSameQuestion(t *testing.T) {
 func TestTouch_CountsReuse(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	e, err := s.Put(f, "q", []byte(payload))
+	e, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500})
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
@@ -339,7 +341,7 @@ func TestPrune_DropsOutdatedFormatRegardlessOfAge(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
 	f.Format = FormatVersion - 1
-	if _, err := s.Put(f, "q", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -354,7 +356,7 @@ func TestPrune_DropsOutdatedFormatRegardlessOfAge(t *testing.T) {
 
 func TestPrune_KeepsRecentEntries(t *testing.T) {
 	s := newStore(t)
-	if _, err := s.Put(baseFingerprint(), "q", []byte(payload)); err != nil {
+	if _, err := s.Put(baseFingerprint(), "q", []byte(payload), Cost{}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	n, err := s.Prune(24 * time.Hour)
@@ -369,7 +371,7 @@ func TestPrune_KeepsRecentEntries(t *testing.T) {
 func TestClearAndStats(t *testing.T) {
 	s := newStore(t)
 	f := baseFingerprint()
-	if _, err := s.Put(f, "a question", []byte(payload)); err != nil {
+	if _, err := s.Put(f, "a question", []byte(payload), Cost{InputTokens: 1000, OutputTokens: 500}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 
@@ -390,6 +392,141 @@ func TestClearAndStats(t *testing.T) {
 	}
 	if v := s.Lookup(f); v.State != StateMiss {
 		t.Errorf("after clear the lookup should miss, got %s", v.State)
+	}
+}
+
+// An unbounded cache is a slow disk leak. These pin the ceilings and, more
+// importantly, *which* entry goes when one is hit.
+
+func putN(t *testing.T, s *Store, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		f := baseFingerprint()
+		f.Question = NormaliseQuestion(fmt.Sprintf("question number %d", i))
+		if _, err := s.Put(f, f.Question, []byte(payload), Cost{OutputTokens: 100}); err != nil {
+			t.Fatalf("put %d: %v", i, err)
+		}
+		// Distinct use times, so "least recently used" is well defined.
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestEnforce_EvictsDownToTheEntryCeiling(t *testing.T) {
+	s := newStore(t)
+	putN(t, s, 6)
+
+	evicted, err := s.Enforce(Limits{MaxEntries: 4})
+	if err != nil {
+		t.Fatalf("enforce: %v", err)
+	}
+	if evicted != 2 {
+		t.Errorf("evicted %d, want 2", evicted)
+	}
+	entries, _ := s.List()
+	if len(entries) != 4 {
+		t.Errorf("%d entries remain, want 4", len(entries))
+	}
+}
+
+// Recency of use, not of writing: a draft written months ago and used
+// yesterday is worth more than one written yesterday and never used again.
+func TestEnforce_EvictsLeastRecentlyUsedFirst(t *testing.T) {
+	s := newStore(t)
+	putN(t, s, 4)
+
+	// Reach back to the oldest entry and use it, which should save it.
+	entries, _ := s.List()
+	oldest := entries[len(entries)-1]
+	keptQuestion := oldest.Question
+	if err := s.Touch(oldest); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+
+	if _, err := s.Enforce(Limits{MaxEntries: 2}); err != nil {
+		t.Fatalf("enforce: %v", err)
+	}
+	remaining, _ := s.List()
+	var found bool
+	for _, e := range remaining {
+		if e.Question == keptQuestion {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the just-used entry was evicted; remaining: %d", len(remaining))
+	}
+}
+
+func TestEnforce_ZeroLimitsMeanUnbounded(t *testing.T) {
+	s := newStore(t)
+	putN(t, s, 5)
+
+	evicted, err := s.Enforce(Limits{})
+	if err != nil {
+		t.Fatalf("enforce: %v", err)
+	}
+	if evicted != 0 {
+		t.Errorf("zero limits should evict nothing, evicted %d", evicted)
+	}
+}
+
+// The store must bound itself on write. A cache that only shrinks when someone
+// remembers to prune it grows without limit in practice.
+func TestPut_SelfBoundsAgainstTheEnvironmentCeiling(t *testing.T) {
+	t.Setenv("CSQ_CACHE_MAX_ENTRIES", "3")
+	s := newStore(t)
+	putN(t, s, 6)
+
+	entries, _ := s.List()
+	if len(entries) > 3 {
+		t.Errorf("%d entries held, but the ceiling is 3", len(entries))
+	}
+}
+
+// Token accounting is what lets the saving be stated rather than asserted.
+func TestStats_CountsTokensStoredAndSaved(t *testing.T) {
+	s := newStore(t)
+	f := baseFingerprint()
+	e, err := s.Put(f, "q", []byte(payload), Cost{InputTokens: 900, OutputTokens: 100})
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	st, err := s.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if st.TokensStored != 1000 {
+		t.Errorf("tokens stored = %d, want 1000", st.TokensStored)
+	}
+	// Nothing reused yet, so nothing saved. Reporting otherwise would be
+	// inventing a benefit.
+	if st.TokensSaved != 0 {
+		t.Errorf("tokens saved = %d before any reuse, want 0", st.TokensSaved)
+	}
+
+	if err := s.Touch(e); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	if err := s.Touch(e); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	st, _ = s.Stats()
+	if st.TokensSaved != 2000 {
+		t.Errorf("tokens saved = %d after two reuses, want 2000", st.TokensSaved)
+	}
+}
+
+// An entry written before token accounting existed must contribute nothing,
+// understating the saving rather than inventing one.
+func TestStats_UncostedEntriesContributeNothing(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.Put(baseFingerprint(), "q", []byte(payload), Cost{}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	st, _ := s.Stats()
+	if st.TokensStored != 0 || st.TokensSaved != 0 {
+		t.Errorf("an uncosted entry should contribute nothing: %+v", st)
 	}
 }
 

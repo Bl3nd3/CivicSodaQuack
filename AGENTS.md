@@ -171,6 +171,14 @@ Two rules keep it honest, and both are easy to erode:
   loader, and `EXPLAIN` exactly as a fresh one does. Caching the *checked* draft
   would turn the cache into a way to skip the checks.
 
+The store bounds itself on write (`Enforce` from `Put`), evicting
+least-recently-used past 200 entries or 32 MB. Bounding on write rather than on
+a schedule is deliberate: a cache that only shrinks when someone remembers to
+prune grows without limit in practice, and a write is exactly when its size is
+known to have changed. Entries carry the token cost of the call that produced
+them, so `Stats` can report the saving as a number — an uncosted entry
+contributes zero, understating the benefit rather than inventing one.
+
 Miss, stale, and corrupt are distinct states with distinct reasons, for the same
 reason "could not measure" and "measured zero" are distinct elsewhere. Staleness
 is normal and explains itself; corruption means an entry is damaged or lying

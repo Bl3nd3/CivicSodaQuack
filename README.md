@@ -309,7 +309,25 @@ An entry is reused only when **every** input still matches: the question, the mo
 
 Two properties follow from how it is built. A cache hit **skips the network call and nothing else** — the read-only guard, the inventory cross-check, the loader's validation and `EXPLAIN` all still run, so a cached draft is never trusted more than a fresh one. And because a hit makes no call, it needs **no API key and no confirmation**: csq checks the cache before it asks permission to contact anything.
 
-There is deliberately no expiry. A draft whose every input is unchanged is exactly as valid a year later — the fingerprint, not the clock, is what makes one stale. `prune` exists for disk hygiene and is your call. The one input the fingerprint cannot see is the model itself changing behind a stable id; `--refresh` is the escape hatch, and `--no-cache` bypasses the cache entirely.
+There is deliberately no expiry. A draft whose every input is unchanged is exactly as valid a year later — the fingerprint, not the clock, is what makes one stale. The one input the fingerprint cannot see is the model itself changing behind a stable id; `--refresh` is the escape hatch, and `--no-cache` bypasses the cache entirely.
+
+**Bounded by default.** The store holds at most 200 entries or 32 MB, whichever binds first, and evicts least-recently-used on write — so it bounds itself rather than waiting for someone to remember to prune. Recency of *use*, not of writing: a draft written months ago and used yesterday is worth more than one written yesterday and never used again. Raise, lower, or remove the ceilings with `CSQ_CACHE_MAX_ENTRIES` and `CSQ_CACHE_MAX_BYTES` (`0` means unbounded), or reclaim space now without changing the standing limits:
+
+```bash
+./csq cache prune --older-than 7d --max-entries 50 --max-bytes 8MB
+```
+
+**Token accounting.** Each entry records what its call cost, so `csq cache stats` reports the saving as a number rather than a claim:
+
+```
+  entries        12  (of 200)
+  on disk        148.2 KB  (of 32.0 MB)
+  reuses         31  (model calls not made)
+  tokens stored  184,220  (what it cost to produce what is held)
+  tokens saved   511,940  (what reuse avoided re-paying)
+```
+
+Entries written before token accounting existed contribute nothing, which understates the saving rather than inventing one.
 
 Three things worth being clear about:
 

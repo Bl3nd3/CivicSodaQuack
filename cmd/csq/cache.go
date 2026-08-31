@@ -188,9 +188,17 @@ func cacheStats() error {
 		return err
 	}
 	fmt.Printf("Draft cache: %s\n\n", s.Dir())
-	fmt.Printf("  entries        %d\n", st.Entries)
-	fmt.Printf("  on disk        %s\n", humaniseBytes(st.Bytes))
+	fmt.Printf("  entries        %d%s\n", st.Entries, limitSuffix(int64(st.Entries),
+		int64(st.Limits.MaxEntries), func(n int64) string { return fmt.Sprintf("%d", n) }))
+	fmt.Printf("  on disk        %s%s\n", humaniseBytes(st.Bytes),
+		limitSuffix(st.Bytes, st.Limits.MaxBytes, humaniseBytes))
 	fmt.Printf("  reuses         %d  (model calls not made)\n", st.Hits)
+	if st.TokensStored > 0 || st.TokensSaved > 0 {
+		fmt.Printf("  tokens stored  %s  (what it cost to produce what is held)\n",
+			withCommas(st.TokensStored))
+		fmt.Printf("  tokens saved   %s  (what reuse avoided re-paying)\n",
+			withCommas(st.TokensSaved))
+	}
 	if !st.Oldest.IsZero() {
 		fmt.Printf("  oldest draft   %s ago\n", humaniseAge(time.Since(st.Oldest).Round(time.Minute)))
 		fmt.Printf("  newest draft   %s ago\n", humaniseAge(time.Since(st.Newest).Round(time.Minute)))
@@ -204,7 +212,11 @@ func cacheStats() error {
 func pruneCache(args []string) error {
 	fs := flag.NewFlagSet("cache prune", flag.ContinueOnError)
 	var older string
+	var maxEntries int
+	var maxBytes string
 	fs.StringVar(&older, "older-than", "30d", "Remove entries unused for longer than this")
+	fs.IntVar(&maxEntries, "max-entries", -1, "Also evict until at most this many remain")
+	fs.StringVar(&maxBytes, "max-bytes", "", "Also evict until the store is at most this large")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -222,7 +234,58 @@ func pruneCache(args []string) error {
 	}
 	fmt.Printf("Removed %d entr%s unused for more than %s.\n",
 		n, plural(n, "y", "ies"), older)
+
+	// An explicit ceiling here overrides the standing one, so a user can
+	// reclaim space now without changing what every future run enforces.
+	limits := cache.DefaultLimits()
+	if maxEntries >= 0 {
+		limits.MaxEntries = maxEntries
+	}
+	if maxBytes != "" {
+		b, err := parseBytes(maxBytes)
+		if err != nil {
+			return err
+		}
+		limits.MaxBytes = b
+	}
+	evicted, err := s.Enforce(limits)
+	if err != nil {
+		return err
+	}
+	if evicted > 0 {
+		fmt.Printf("Evicted %d least-recently-used entr%s to fit within %d entries / %s.\n",
+			evicted, plural(evicted, "y", "ies"), limits.MaxEntries, humaniseBytes(limits.MaxBytes))
+	}
 	return nil
+}
+
+// parseBytes reads a size with an optional unit suffix.
+func parseBytes(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(s, "KB"), strings.HasSuffix(s, "K"):
+		mult, s = 1<<10, strings.TrimRight(strings.TrimSuffix(s, "KB"), "K")
+	case strings.HasSuffix(s, "MB"), strings.HasSuffix(s, "M"):
+		mult, s = 1<<20, strings.TrimRight(strings.TrimSuffix(s, "MB"), "M")
+	case strings.HasSuffix(s, "GB"), strings.HasSuffix(s, "G"):
+		mult, s = 1<<30, strings.TrimRight(strings.TrimSuffix(s, "GB"), "G")
+	case strings.HasSuffix(s, "B"):
+		s = strings.TrimSuffix(s, "B")
+	}
+	var n float64
+	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%g", &n); err != nil || n < 0 {
+		return 0, fmt.Errorf("could not read %q as a size (try 32MB, 500KB, or 0 for no limit)", s)
+	}
+	return int64(n * float64(mult)), nil
+}
+
+// limitSuffix renders "  (of X)" when a ceiling is in force.
+func limitSuffix(used, limit int64, render func(int64) string) string {
+	if limit <= 0 {
+		return "  (no limit)"
+	}
+	return fmt.Sprintf("  (of %s)", render(limit))
 }
 
 func clearCache() error {
