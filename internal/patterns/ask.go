@@ -84,8 +84,16 @@ func Suggest(question string, inv *personal.Portal, preferTable string) (*Sugges
 	// Assign columns role by role, never reusing one: a query grouping a column
 	// by itself is always a mistake, and it is an easy one for a scorer to make
 	// when one column happens to look good for two roles.
+	// A word that identified the table has already done its job, and must not
+	// also pick a column inside it. "Which precincts have the most complaints"
+	// names the nypd_complaints table with "complaints"; letting that word run
+	// again over the columns lands on cmplnt_to_tm, an identifier-ish field
+	// that happens to share the prefix, instead of the precinct column the
+	// question is actually about.
+	colTerms := withoutWords(terms, tokeniseIdent(table.Name+" "+table.DatasetName))
+
 	used := map[string]bool{}
-	wantsQuantity := asksForAQuantity(terms)
+	wantsQuantity := asksForAQuantity(colTerms)
 	for _, param := range p.Params {
 		// "the most permits" and "the most money" are both ordinary readings of
 		// "the most", and they are different questions. Attach a summed measure
@@ -94,7 +102,7 @@ func Suggest(question string, inv *personal.Portal, preferTable string) (*Sugges
 		if param.Role == RoleMeasure && !param.Required && !wantsQuantity {
 			continue
 		}
-		col, why, ok := chooseColumn(terms, table, param, used)
+		col, why, ok := chooseColumn(colTerms, table, param, used)
 		if !ok {
 			if param.Required {
 				return nil, fmt.Errorf(
@@ -184,6 +192,14 @@ func chooseTable(terms []string, inv *personal.Portal, prefer string, p *Pattern
 		return inv.Tables[0], "the only table in this database", nil
 	}
 
+	// A word that chose the *pattern* says nothing about the *table*. "Most",
+	// "trend" and "missing" describe a shape, and matching them against a
+	// table's prose is noise that outranks real evidence: on Cook County,
+	// "which courts handle the most cases" picked `initiation` because its
+	// description contains "most", over the two tables that actually have a
+	// court_name column.
+	terms = withoutPatternWords(terms)
+
 	type scored struct {
 		t       personal.Table
 		score   float64
@@ -209,15 +225,29 @@ func chooseTable(terms []string, inv *personal.Portal, prefer string, p *Pattern
 				reason = fmt.Sprintf("its description matches %q", hit)
 			}
 		}
-		// Column evidence: how well this table can fill the pattern's roles.
-		var colScore float64
+		// Column evidence, counted as how much of the question the table's
+		// columns *cover* rather than as the single best match. "Which courts
+		// handle the most cases" mentions two things; the table with both a
+		// court and a case column is more likely the subject than one with
+		// only cases, and taking a maximum made those score identically.
+		covered := map[string]bool{}
 		var colHit string
 		for _, c := range t.Columns {
-			s, hit := scoreKeywords(terms, tokeniseIdent(c.Name))
-			if s > colScore {
-				colScore, colHit = s, hit
+			if looksLikeAnID(c.Name) {
+				continue // an id column is not evidence of subject matter
+			}
+			for _, term := range terms {
+				if s, _ := scoreKeywords([]string{term}, tokeniseIdent(c.Name)); s > 0 {
+					if !covered[term] {
+						covered[term] = true
+						if colHit == "" {
+							colHit = term
+						}
+					}
+				}
 			}
 		}
+		colScore := float64(len(covered))
 		if colScore > 0 {
 			score += colScore * 3
 			if reason == "" || colScore*3 > 2 {
@@ -426,12 +456,17 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param, tableNam
 		}
 	}
 
-	// A column named after its own table is that table's identifier, not a
-	// description of anything: building_permits.permit_ holds a permit number.
-	// Ranking by one produces a row per record, which is never the answer to
-	// "who did the most".
-	if param.Role == RoleEntity && subsetOf(name, tokeniseIdent(tableName)) {
-		score -= 4
+	// Identifiers are never what a ranking or a breakdown is about. Grouping by
+	// one produces a row per record — Cook County's "which courts handle the
+	// most cases" landed on case_id, which answers with 1.2M rows of 1.
+	//
+	// Two shapes of identifier, both by naming convention: a column named after
+	// its own table (building_permits.permit_ holds a permit number), and the
+	// near-universal _id suffix.
+	if param.Role == RoleEntity || param.Role == RoleCategory || param.Role == RoleGroup {
+		if subsetOf(name, tokeniseIdent(tableName)) || looksLikeAnID(c.Name) {
+			score -= 6
+		}
 	}
 
 	// Among candidates matching equally well, prefer the least qualified name.
@@ -527,6 +562,56 @@ func scoreKeywords(terms []string, vocab []string) (float64, string) {
 	return total, bestTerm
 }
 
+// patternWords is every single word that can select a pattern. Phrases are
+// excluded: their component words ("by month", "how many of") are ordinary
+// English that may legitimately name a column.
+var patternWords = func() map[string]bool {
+	out := map[string]bool{}
+	for _, kws := range patternKeywords {
+		for _, k := range kws {
+			if !strings.Contains(k, " ") {
+				out[k] = true
+			}
+		}
+	}
+	return out
+}()
+
+// withoutWords drops any term appearing in drop.
+func withoutWords(terms, drop []string) []string {
+	set := make(map[string]bool, len(drop))
+	for _, d := range drop {
+		set[d] = true
+	}
+	out := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if !set[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// withoutPatternWords drops the shape-selecting vocabulary from a term list.
+func withoutPatternWords(terms []string) []string {
+	out := make([]string, 0, len(terms))
+	for _, t := range terms {
+		if !patternWords[t] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// looksLikeAnID reports whether a column name follows the near-universal
+// convention for an identifier. It is a naming convention, not a guarantee —
+// but a column called `case_id` is one, and grouping by it is never an answer.
+func looksLikeAnID(name string) bool {
+	l := strings.ToLower(strings.TrimRight(name, "_"))
+	return l == "id" || strings.HasSuffix(l, "_id") || strings.HasSuffix(l, "_num") ||
+		strings.HasSuffix(l, "_number") || strings.HasSuffix(l, "_key")
+}
+
 // subsetOf reports whether every token of a appears in b.
 func subsetOf(a, b []string) bool {
 	if len(a) == 0 {
@@ -607,9 +692,67 @@ func tokenise(s string) []string {
 	return out
 }
 
+// abbreviations expands the contractions civic portals name columns with.
+//
+// NYPD's complaint extract is the extreme case — ofns_desc, boro_nm,
+// addr_pct_cd, prem_typ_desc, cmplnt_fr_dt — and none of it is reachable from
+// the English a person types. Without this, "how do complaints break down by
+// borough" cannot find boro_nm and settles for whatever else looks like a
+// category, which on that table is the suspect's age group.
+//
+// Only unambiguous, widely used contractions belong here. Each entry is a claim
+// that one string means another in civic data, and a wrong one produces a
+// confidently wrong column.
+var abbreviations = map[string]string{
+	"cmplnt": "complaint",
+	"ofns":   "offense",
+	"boro":   "borough",
+	"pct":    "precinct",
+	"prem":   "premises",
+	"juris":  "jurisdiction",
+	"susp":   "suspect",
+	"vic":    "victim",
+	"addr":   "address",
+	"loc":    "location",
+	"desc":   "description",
+	"nm":     "name",
+	"dt":     "date",
+	"cd":     "code",
+	"sr":     "service",
+	"typ":    "type",
+	"num":    "number",
+	"amt":    "amount",
+	"dept":   "department",
+	"dist":   "district",
+	"yr":     "year",
+	"qty":    "quantity",
+	"cnt":    "count",
+	"pymt":   "payment",
+	"org":    "organization",
+}
+
 // tokeniseIdent splits a column or table name into words, handling both
-// snake_case and camelCase, since portals use each about equally.
+// snake_case and camelCase, since portals use each about equally, and adds the
+// expansion of any abbreviation among them.
 func tokeniseIdent(s string) []string {
+	out := tokeniseIdentRaw(s)
+	// Look the abbreviations up against the *raw* words. tokeniseIdentRaw
+	// singularises, which turns "ofns" into "ofn" and loses the entry.
+	for _, raw := range splitWords(spaceCamelCase(s)) {
+		if full, ok := abbreviations[raw]; ok {
+			out = append(out, full)
+		}
+	}
+	return out
+}
+
+func tokeniseIdentRaw(s string) []string {
+	return tokenise(spaceCamelCase(s))
+}
+
+// spaceCamelCase inserts a space before each capital that starts a word, so
+// snake_case and camelCase names split the same way.
+func spaceCamelCase(s string) string {
 	var spaced strings.Builder
 	runes := []rune(s)
 	for i, r := range runes {
@@ -619,7 +762,7 @@ func tokeniseIdent(s string) []string {
 		}
 		spaced.WriteRune(r)
 	}
-	return tokenise(spaced.String())
+	return spaced.String()
 }
 
 // singular strips a trailing plural 's', which is enough for the vocabulary
@@ -628,7 +771,11 @@ func singular(s string) string {
 	switch {
 	case strings.HasSuffix(s, "ies") && len(s) > 4:
 		return s[:len(s)-3] + "y"
-	case strings.HasSuffix(s, "ses") && len(s) > 4:
+	// "sses", not "ses": classes→class and addresses→address drop the "es",
+	// but offenses→offense and licenses→license drop only the "s". Matching on
+	// "ses" turned "offenses" into "offens", which matches nothing at all —
+	// which is why NYPD's ofns_desc was unreachable.
+	case strings.HasSuffix(s, "sses") && len(s) > 5:
 		return s[:len(s)-2]
 	case strings.HasSuffix(s, "s") && !strings.HasSuffix(s, "ss") && len(s) > 3:
 		return s[:len(s)-1]
@@ -682,12 +829,10 @@ var synonyms = map[string][]string{
 	"ward":         {"ward", "district", "precinct", "beat", "area"},
 	"district":     {"district", "ward", "precinct", "area", "borough"},
 	"neighborhood": {"neighborhood", "community", "area", "district", "ward"},
-	// In 311 data a "complaint" is a service-request type, which is why this
-	// reaches "type": Chicago files it as sr_type.
-	"complaint": {"complaint", "case", "allegation", "incident", "sr", "service", "request", "type"},
-	"community": {"community", "neighborhood", "area", "district"},
-	"borough":   {"borough", "district", "area"},
-	"zip":       {"zip", "postal", "zipcode"},
+	"complaint":    {"complaint", "case", "allegation", "incident", "sr", "service", "request"},
+	"community":    {"community", "neighborhood", "area", "district"},
+	"borough":      {"borough", "district", "area"},
+	"zip":          {"zip", "postal", "zipcode"},
 
 	"date":  {"date", "time", "day", "issued", "awarded", "filed", "created", "start"},
 	"when":  {"date", "time", "issued", "awarded", "filed", "created"},
@@ -733,6 +878,8 @@ var patternKeywords = map[string][]string{
 		"breakdown", "break down", "distribution", "split", "composition",
 		"by type", "by category", "by status", "by kind", "how many of",
 		"what kind", "what type", "categories", "proportion of",
+		// Criminal-justice portals ask this as an outcome question.
+		"disposed", "disposition", "outcome", "outcomes", "resolved",
 	},
 	"coverage": {
 		"missing", "null", "empty", "blank", "incomplete", "complete", "completeness",

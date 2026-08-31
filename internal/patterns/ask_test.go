@@ -358,6 +358,164 @@ func TestSuggest_PhrasesSurviveStopwords(t *testing.T) {
 	}
 }
 
+// Everything above was tuned on Chicago. These come from running the router
+// against NYPD's complaint extract and Cook County's court data — portals whose
+// naming conventions it had never seen — and each pins a rule that generalises
+// rather than a Chicago-shaped coincidence.
+
+// nycInventory reproduces NYPD's abbreviation style, which is where the router
+// was completely blind: ofns_desc, boro_nm, addr_pct_cd are unreachable from
+// the English anyone would type.
+func nycInventory() *personal.Portal {
+	return &personal.Portal{
+		Alias: "p", Host: "data.cityofnewyork.us",
+		Tables: []personal.Table{{
+			Name: "nypd_complaints", DatasetName: "NYPD Complaint Data Historic",
+			Columns: []personal.Column{
+				{Name: "cmplnt_num", Type: "VARCHAR"},
+				{Name: "cmplnt_fr_dt", Type: "TIMESTAMP"},
+				{Name: "cmplnt_to_tm", Type: "VARCHAR"},
+				{Name: "ofns_desc", Type: "VARCHAR"},
+				{Name: "boro_nm", Type: "VARCHAR"},
+				{Name: "addr_pct_cd", Type: "DOUBLE"},
+				{Name: "prem_typ_desc", Type: "VARCHAR"},
+				{Name: "susp_age_group", Type: "VARCHAR"},
+			},
+		}},
+	}
+}
+
+func TestSuggest_ReadsAbbreviatedColumnNames(t *testing.T) {
+	cases := map[string]struct {
+		role Role
+		want string
+	}{
+		"what are the most common offenses?":       {RoleEntity, "ofns_desc"},
+		"how do complaints break down by borough?": {RoleCategory, "boro_nm"},
+		"which precincts have the most reports?":   {RoleEntity, "addr_pct_cd"},
+	}
+	for q, tc := range cases {
+		s, err := Suggest(q, nycInventory(), "")
+		if err != nil {
+			t.Errorf("%s: %v", q, err)
+			continue
+		}
+		if got := s.Columns[tc.role]; got != tc.want {
+			t.Errorf("%s: %s = %q, want %q", q, tc.role, got, tc.want)
+		}
+	}
+}
+
+// "offenses" ends in "ses" but its singular drops only the "s". Treating it
+// like "classes" produced "offens", which matches nothing — and made NYPD's
+// ofns_desc permanently unreachable.
+func TestSingular_HandlesSesEndings(t *testing.T) {
+	for in, want := range map[string]string{
+		"offenses":  "offense",
+		"licenses":  "license",
+		"cases":     "case",
+		"classes":   "class",
+		"addresses": "address",
+	} {
+		if got := singular(in); got != want {
+			t.Errorf("singular(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A _tm column holds a time of day. "Over time" puts "time" in the question,
+// so expanding tm→time made it outrank the real timestamp column.
+func TestSuggest_TimeOfDayIsNotAnEventDate(t *testing.T) {
+	s, err := Suggest("how have complaints trended over time?", nycInventory(), "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	got := s.Columns[RoleDate]
+	if got == "cmplnt_to_tm" {
+		t.Error("picked a time-of-day column as the event date")
+	}
+	if typ, _ := columnType(s.Table, got); !isTemporalType(typ) {
+		t.Errorf("event_date = %q, which is %s — a real date column exists", got, typ)
+	}
+}
+
+// A word that identified the table has done its job. Letting it run again over
+// the columns lands on whatever shares the table's prefix.
+func TestSuggest_TableWordDoesNotAlsoPickAColumn(t *testing.T) {
+	s, err := Suggest("which precincts have the most complaints?", nycInventory(), "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if got := s.Columns[RoleEntity]; got != "addr_pct_cd" {
+		t.Errorf("entity = %q, want addr_pct_cd — 'complaints' names the table", got)
+	}
+}
+
+// Grouping by an identifier answers with one row per record. Cook County's
+// "which courts handle the most cases" landed on case_id: 1.2M rows of 1.
+func TestSuggest_NeverGroupsByAnIdentifier(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{{
+			Name: "sentencing", DatasetName: "Sentencing",
+			Columns: []personal.Column{
+				{Name: "case_id", Type: "DOUBLE"},
+				{Name: "court_name", Type: "VARCHAR"},
+				{Name: "sentence_type", Type: "VARCHAR"},
+			},
+		}},
+	}
+	s, err := Suggest("which courts handle the most cases?", inv, "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if got := s.Columns[RoleEntity]; got == "case_id" {
+		t.Error("ranked by case_id, which yields one row per record")
+	}
+}
+
+func TestLooksLikeAnID(t *testing.T) {
+	for name, want := range map[string]bool{
+		"case_id": true, "id": true, "cmplnt_num": true, "charge_id": true,
+		"order_key": true, "vendor_name": false, "total_fee": false,
+		"identity": false, "paid": false,
+	} {
+		if got := looksLikeAnID(name); got != want {
+			t.Errorf("looksLikeAnID(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// A word that selected the pattern says nothing about the table. Matching
+// "most" against a table's prose outranked real column evidence.
+func TestSuggest_PatternWordsAreNotTableEvidence(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{
+			{
+				Name: "initiation", DatasetName: "Initiation",
+				Description: "Cases as they enter the system; most are felonies.",
+				Columns:     []personal.Column{{Name: "offense_category", Type: "VARCHAR"}},
+			},
+			{
+				Name: "sentencing", DatasetName: "Sentencing",
+				Columns: []personal.Column{
+					{Name: "court_name", Type: "VARCHAR"},
+					{Name: "sentence_type", Type: "VARCHAR"},
+				},
+			},
+		},
+	}
+	s, err := Suggest("which courts hand down the most sentences?", inv, "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if s.Table.Name != "sentencing" {
+		t.Errorf("table = %q, want sentencing — 'most' in a description is not evidence",
+			s.Table.Name)
+	}
+}
+
 // An explicit --table must win over the router's own guess.
 func TestSuggest_HonoursAnExplicitTable(t *testing.T) {
 	s, err := Suggest("which columns are missing data?", inventory(), "permits")
