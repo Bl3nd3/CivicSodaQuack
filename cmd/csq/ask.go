@@ -15,15 +15,15 @@ import (
 	"github.com/neomantra/CivicSodaQuack/internal/personal"
 )
 
-const askUsage = `csq modes ask — ask a question in English, with no API key
+const askUsage = `csq modes ask — build a mode by asking in English
 
 Usage:
   csq modes ask "<question>" --db <file> [options]
 
 csq matches your question against its analysis patterns and the columns of the
 tables you hold, shows you what it picked and why, and builds the mode once you
-confirm. No model, no network, no credentials — the matching is keyword scoring
-against your own schema.
+confirm. The matching is keyword scoring over your own schema: it runs entirely
+on this machine and makes no network call.
 
 It refuses rather than guesses. A question it cannot place, or a column it
 cannot identify, comes back as a message telling you how to say it explicitly

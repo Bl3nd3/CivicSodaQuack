@@ -7,18 +7,18 @@ package modes
 //
 // The other four modes ship with their questions already chosen. This one ships
 // empty, because the question it answers is whichever one the user has. Running
-// `csq modes personal "<question>"` asks a model to draft concepts, SQL, and
-// caveats against the tables that user actually holds, saves the result as JSON
-// in the modes directory, and from then on that file *is* this mode — the
-// loader replaces a built-in with an external mode of the same name, so nothing
+// `csq modes ask "<question>"` matches that question against csq's analysis
+// patterns and the columns of the tables the user holds, builds the concepts,
+// SQL, and caveats from a reviewed template, saves the result as JSON in the
+// modes directory, and from then on that file *is* this mode — the loader
+// replaces a built-in with an external mode of the same name, so nothing
 // downstream can tell the difference.
 //
 // That replacement is the whole design. A generated mode is not a special kind
 // of object with its own runner and its own trust rules; it is an ordinary mode
 // file, held to the same validation, expanded through the same bindings, scored
-// by the same confidence arithmetic, and editable in a text editor when the
-// model gets something wrong. The model's output is a draft a person owns, not
-// an answer they have to accept.
+// by the same confidence arithmetic, and editable in a text editor when a
+// column was matched wrongly.
 //
 // Until then, the queries below are the empty state, and they are the ones
 // worth running before writing any mode: what is actually here, how big it is,
@@ -26,20 +26,20 @@ package modes
 // binding cannot run, and shipping one would mean shipping something broken.
 var personalMode = &Mode{
 	Name:        "personal",
-	Title:       "Personal — your own mode, drafted from your own question",
+	Title:       "Personal — your own mode, built from your own question",
 	Summary:     "Ask a question in English; csq writes the mode and keeps it as JSON you own",
 	MultiPortal: true,
-	About: "The mode you write for yourself. Run `csq modes personal \"<question>\" " +
-		"--db <file>` and csq shows a language model the tables you hold — names, " +
-		"columns, and types, never the rows — then asks it to draft the concepts, " +
-		"the SQL, and the interpretation caveats that answer your question. The " +
-		"draft is checked as read-only, validated by the same parser that loads " +
-		"every other mode, and planned against DuckDB before it is kept, so a " +
-		"query that cannot run never reaches you. What lands is a JSON file in " +
-		"your modes directory: read it, edit it, delete a query you dislike, and " +
-		"ask again to add more. Until you have asked something, this mode reports " +
-		"what you hold and how stale it is — the inventory worth reading before " +
-		"choosing a question.",
+	About: "The mode you write for yourself. Run `csq modes ask \"<question>\" " +
+		"--db <file>` and csq matches your question against its analysis patterns " +
+		"and the columns of the tables you hold, shows you which pattern and which " +
+		"columns it picked and why, and builds the mode once you confirm. No API " +
+		"key, no network, no model: the SQL comes from a reviewed template and the " +
+		"caveats come with it. What lands is a JSON file in your modes directory — " +
+		"read it, edit it, delete a query you dislike, and ask again to add more. " +
+		"`csq modes patterns` lists the shapes available and `csq modes add` drives " +
+		"one directly when you already know what you want. Until you have asked " +
+		"something, this mode reports what you hold and how stale it is — the " +
+		"inventory worth reading before choosing a question.",
 
 	Queries: []Query{
 		{
@@ -93,12 +93,13 @@ LIMIT 100`,
 
 	Caveats: []string{
 		"This is the empty state of the personal mode. It reports what you have synced, " +
-			"not anything about a city — run `csq modes personal \"<question>\" --db <file>` " +
+			"not anything about a city — run `csq modes ask \"<question>\" --db <file>` " +
 			"to replace it with queries that answer something.",
-		"Once drafted, the SQL in this mode was written by a language model from your " +
-			"column names. csq checks that it is read-only, that it validates, and that " +
-			"DuckDB can plan it — none of which is a check that it measures what you meant. " +
-			"Read the SQL under `csq modes show personal` before quoting a result.",
+		"Once built, the SQL in this mode comes from a reviewed pattern pointed at " +
+			"columns matched to your question. csq checks that it is read-only, that it " +
+			"validates, and that DuckDB can plan it — none of which is a check that the " +
+			"right columns were matched. Read the SQL under `csq modes show personal` " +
+			"before quoting a result.",
 		"A drafted mode is a file you own, at the path `csq modes where` reports. Editing " +
 			"it is expected: correct a column mapping, drop a query, sharpen a caveat. " +
 			"Asking another question adds to that file and never rewrites what is in it.",

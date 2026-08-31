@@ -1,17 +1,19 @@
 // Copyright (c) 2026 Neomantra Corp
 
-// Package personal turns a question in English into a mode file.
+// Package personal holds the machinery behind a user's own mode: the schema
+// inventory a query is built against, the read-only guard every query must
+// pass, the documents a mode is made of, and the save-and-verify path that puts
+// them on disk.
 //
-// The mode it writes is an ordinary csq mode: concepts, SQL, caveats, a
-// binding. It is loaded by the same parser, validated by the same rules, run by
-// the same runner, and scored by the same confidence arithmetic as the built-in
-// modes. Nothing about a generated mode is privileged, and that is the design —
-// the model's output is a text file the user owns, reads, edits, and re-runs,
-// not an answer they have to take on trust.
+// What it produces is an ordinary csq mode — concepts, SQL, caveats, a binding
+// — loaded by the same parser, validated by the same rules, run by the same
+// runner, and scored by the same confidence arithmetic as the built-in modes.
+// Nothing about a generated mode is privileged, which is the point: it is a
+// text file the user owns, reads, edits, and re-runs, not an answer they have
+// to take on trust.
 //
-// The model never sees a row of data unless the user asks for samples, never
-// executes anything, and never reports a number. It reads a schema inventory
-// and writes SQL. DuckDB produces every figure the user is shown.
+// The queries themselves come from internal/patterns — reviewed SQL templates
+// pointed at columns the user names. csq makes no network call to build one.
 package personal
 
 import (
@@ -19,8 +21,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/neomantra/CivicSodaQuack/internal/cache"
 )
 
 // Column is one column of a synced table, as DuckDB reports it.
@@ -28,8 +28,8 @@ type Column struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
 	// Samples holds a few distinct non-null values, present only when the user
-	// asked for them. They make generated filters land on real category
-	// spellings instead of plausible guesses.
+	// asked for them. They show how a category is actually spelled, so a filter
+	// is written against 'STREETS & SAN' rather than a plausible guess.
 	Samples []string `json:"samples,omitempty"`
 }
 
@@ -40,7 +40,7 @@ type Table struct {
 	Columns []Column `json:"columns"`
 
 	// DatasetID and DatasetName come from _csq.catalog, and are what a binding
-	// must record. Without them a generated binding cannot cite its source.
+	// must record. Without them a binding cannot cite its source.
 	DatasetID   string `json:"dataset_id,omitempty"`
 	DatasetName string `json:"dataset_name,omitempty"`
 	Description string `json:"description,omitempty"`
@@ -94,9 +94,9 @@ ORDER BY table_name`, alias)
 		return nil, err
 	}
 	// Provenance is best-effort: a database synced by an older csq, or one
-	// assembled by hand, still has usable tables. A mode authored without
-	// dataset ids is worse — the binding cannot cite its source — but it is far
-	// better than refusing to work at all.
+	// assembled by hand, still has usable tables. A mode built without dataset
+	// ids is worse — the binding cannot cite its source — but it is far better
+	// than refusing to work at all.
 	_ = loadProvenance(db, alias, byName)
 
 	return p, nil
@@ -153,22 +153,22 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY r.table_name ORDER BY r.started_at DESC)
 }
 
 // maxSampleValues caps how many distinct values are read per column. A handful
-// is enough to show the model how a category is spelled; more is data transfer
-// with no added signal.
+// is enough to show how a category is spelled; more is noise in a listing
+// someone has to read.
 const maxSampleValues = 8
 
 // sampleCardinalityCeiling bounds which columns are worth sampling. A column
 // with thousands of distinct values is a free-text or identifier field, and a
-// sample of it teaches the model nothing about how to filter on it.
+// sample of it says nothing about how to filter on it.
 const sampleCardinalityCeiling = 40
 
-// SampleColumns fills in a few distinct values for low-cardinality text columns.
+// SampleColumns fills in a few distinct values for low-cardinality text columns,
+// so `csq modes tables --samples` can show how a category is really spelled.
 //
-// This is the only part of csq that reads data on the model's behalf, so it is
-// opt-in and the caller says so in the output. The payoff is real: without it a
-// generated filter says department = 'Streets and Sanitation' where the portal
-// actually writes 'STREETS & SAN', and the query returns zero rows that look
-// like a finding.
+// It is opt-in because it is the only part of this package that reads data
+// rather than metadata. The payoff is real: a filter written against
+// 'Streets and Sanitation' where the portal holds 'STREETS & SAN' returns zero
+// rows that look like a finding.
 func SampleColumns(db *sql.DB, p *Portal) error {
 	for ti := range p.Tables {
 		t := &p.Tables[ti]
@@ -182,8 +182,8 @@ func SampleColumns(db *sql.DB, p *Portal) error {
 			}
 			vals, err := sampleColumn(db, p.Alias, t.Name, c.Name)
 			if err != nil {
-				// One unreadable column must not abort an inventory; the model
-				// simply gets no samples for it.
+				// One unreadable column must not abort an inventory; it
+				// simply gets no samples.
 				continue
 			}
 			c.Samples = vals
@@ -243,11 +243,11 @@ func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
-// Brief renders the inventory as the compact text the model reads.
+// Brief renders the inventory as compact text.
 //
 // It is written for a reader with no access to the database: every table, its
-// size, and every column with its type, because a column the model cannot see
-// is a column it will invent.
+// size, and every column with its type, because a column you cannot see is one
+// you cannot point a pattern at.
 func (p *Portal) Brief() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "portal: %s\n", p.Host)
@@ -278,28 +278,6 @@ func (p *Portal) Brief() string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// Shape reduces the inventory to the parts that determine a draft, for the
-// cache fingerprint.
-//
-// It carries the sample values too. They are shown to the model when the user
-// asks for them, so a resync that changes how a category is spelled has to
-// invalidate the cached draft — the old SQL may still plan while filtering on
-// a spelling the data no longer uses, which returns zero rows that look like a
-// finding.
-func (p *Portal) Shape() []cache.TableShape {
-	out := make([]cache.TableShape, 0, len(p.Tables))
-	for _, t := range p.Tables {
-		cols := make([]cache.ColumnShape, 0, len(t.Columns))
-		for _, c := range t.Columns {
-			cols = append(cols, cache.ColumnShape{
-				Name: c.Name, Type: c.Type, Samples: c.Samples,
-			})
-		}
-		out = append(out, cache.TableShape{Name: t.Name, Rows: t.Rows, Columns: cols})
-	}
-	return out
 }
 
 // TableNames lists the local tables, for error messages that need to say what

@@ -32,10 +32,9 @@ Usage:
   csq modes schema                       Print the JSON Schema a mode file must match
   csq modes patterns                     Analysis shapes you can build a mode from
   csq modes tables --db <file>           Tables and columns a pattern can point at
+  csq modes ask "<question>" --db <file> Build a mode by asking in English
   csq modes add <pattern> --db <file> --table <name> [role flags]
-                                         Build a mode query from a pattern (no API key)
-  csq modes personal "<question>" --db <file>
-                                         Draft a mode from a question (uses Claude)
+                                         Build a mode query from a pattern directly
   csq modes where                        Show where external modes are loaded from
 
 Modes and bindings can be added as YAML or JSON in ~/.csq/modes/ (override with
@@ -43,12 +42,11 @@ Modes and bindings can be added as YAML or JSON in ~/.csq/modes/ (override with
 same document: 'csq modes schema' prints the shape, and 'csq modes lint' checks
 a file before use. An external mode replaces a built-in of the same name.
 
-There are two ways to have csq write one of those files for you. 'csq modes
-add' builds a query from a reviewed SQL pattern and the columns you name — no
-API key, no network, and the caveats come with the pattern. 'csq modes
-personal' instead shows Claude the tables you hold (names, columns, and types,
-never the rows) and asks it to draft one. Both produce the same JSON, checked
-the same way.
+csq can write one of those files for you. 'csq modes ask' matches a question in
+English against its analysis patterns and the columns of the tables you hold,
+shows what it picked and why, and builds the mode once you confirm. 'csq modes
+add' skips the matching and takes the pattern and columns directly. Neither
+makes a network call, and the caveats come with the pattern.
 
 Examples:
   csq modes
@@ -57,7 +55,7 @@ Examples:
   csq sync --config police.yaml
   csq modes run police --db data.cityofchicago.org.duckdb --query finding-outcomes
   csq modes run ranking --db chicago.duckdb --db cookcounty.duckdb
-  csq modes personal "which vendors got the most money?" --db chicago.duckdb
+  csq modes ask "which vendors got the most money?" --db chicago.duckdb
 `
 
 func runModes(args []string) error {
@@ -87,8 +85,6 @@ func runModes(args []string) error {
 		return runModeAdd(args[1:])
 	case "ask":
 		return runModeAsk(args[1:])
-	case "personal":
-		return runPersonalMode(args[1:])
 	case "where":
 		return showModesDir(os.Stdout)
 	case "-h", "--help", "help":
@@ -611,10 +607,10 @@ func pickBinding(m *modes.Mode, portal string) (*modes.Binding, error) {
 
 // printModeSchema writes the JSON Schema a mode or binding file must satisfy.
 //
-// It is the same schema the personal mode constrains Claude to, which is the
-// point of printing it: what a person may write by hand and what a model may
-// draft are one grammar, so a generated file is editable and a hand-written one
-// is loadable, with no second format to learn.
+// It is the same schema 'csq modes ask' and 'csq modes add' write against,
+// which is the point of printing it: what a person writes by hand and what csq
+// generates are one grammar, so a generated file stays editable and a
+// hand-written one stays loadable, with no second format to learn.
 func printModeSchema(out *os.File) error {
 	s, err := modes.SchemaJSON()
 	if err != nil {

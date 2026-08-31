@@ -4,8 +4,10 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -26,8 +28,8 @@ Usage:
   csq modes tables --db <file>       The tables and columns you can point one at
 
 A pattern is a reviewed SQL template with holes for the columns you choose.
-Building a mode from one needs no API key, no network, and no model — and the
-caveats come with the pattern, written once rather than regenerated.
+The caveats come with the pattern, written once and reviewed rather than
+reinvented per query.
 `
 
 const addUsage = `csq modes add — build a mode query from a pattern
@@ -78,7 +80,7 @@ func runPatterns(args []string) error {
 }
 
 func listPatterns() error {
-	fmt.Printf("Analysis patterns — build a mode without a model or an API key:\n\n")
+	fmt.Printf("Analysis patterns — the shapes a mode can be built from:\n\n")
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	for _, p := range patterns.All() {
 		var flags []string
@@ -405,6 +407,37 @@ func buildAndSave(a buildAndSaveArgs) error {
 		}
 	}
 	return nil
+}
+
+// printDraft writes the two documents a mode is made of, for --dry-run.
+func printDraft(d *personal.Draft) error {
+	for _, doc := range []any{d.Mode, d.Binding} {
+		body, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(body))
+	}
+	fmt.Fprintf(os.Stderr,
+		"[csq] --dry-run: nothing saved. Save the JSON above into your modes directory\n"+
+			"      (csq modes where) to use it, or re-run without --dry-run.\n")
+	return nil
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // attachReadOnly opens an in-memory host and attaches one portal read-only.

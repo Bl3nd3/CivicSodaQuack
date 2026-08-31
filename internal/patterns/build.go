@@ -81,10 +81,10 @@ func Build(req BuildRequest) (*personal.Draft, error) {
 		Name:    req.ModeName,
 		Title:   fmt.Sprintf("Personal — %s", req.ModeName),
 		Summary: "Built from analysis patterns against tables held locally",
-		About: "Assembled from csq's analysis patterns with 'csq modes add' or " +
-			"'csq modes ask'. Every query here comes from a reviewed SQL template " +
-			"pointed at columns of your own tables, so nothing in this file was " +
-			"written by a model, and building it required no API key and no network.",
+		About: "Assembled from csq's analysis patterns with 'csq modes ask' or " +
+			"'csq modes add'. Every query here comes from a reviewed SQL template " +
+			"pointed at columns of your own tables — assembled from a template " +
+			"rather than generated, and built without any network call.",
 		Concepts: []personal.Concept{{
 			Name: concept,
 			Purpose: fmt.Sprintf("Records from %s, read as %s.",

@@ -19,9 +19,7 @@ internal/
   portallock/      advisory <dbpath>.lock (flock) shared by every subcommand
   modes/           curated analysis profiles: concepts, bindings, queries, caveats
   patterns/        builds a mode from reviewed SQL shapes — no model, no network
-  personal/        drafts a mode from a question: schema inventory, SQL guard, merge
-  llm/             the one Anthropic call csq makes, constrained to a JSON schema
-  cache/           drafted replies on disk, with the fingerprint that invalidates them
+  personal/        schema inventory, read-only SQL guard, mode documents, save/verify
   analysis/        runs mode queries headlessly, returns structured results
   confidence/      scores how far the data behind an answer can be trusted
   web/             browser UI, CSV/JSON export, standalone HTML reports
@@ -62,10 +60,10 @@ the CLI.
 validator with two decoders — both strict about unknown keys, because a silently
 ignored `caveats` or `columns` produces a mode that runs and answers wrongly.
 `schema.go` holds the JSON Schema for those documents, and it is deliberately
-the only copy: `csq modes schema` prints it, and the personal mode constrains
-the model to it. A second hand-maintained copy is the obvious way for the two to
-drift, at which point the model emits documents the loader rejects and the error
-lands on the user.
+the only copy: `csq modes schema` prints it, and `csq modes ask` / `add` write
+against it. A second hand-maintained copy is the obvious way for the two to
+drift, at which point csq generates documents its own loader rejects and the
+error lands on the user.
 
 An external mode **replaces a built-in of the same name**. That is not a
 convenience — it is the mechanism the `personal` mode is built on.
@@ -93,57 +91,32 @@ measured with one joint SQL filter, not per-column rates multiplied — nulls in
 civic data cluster hard, and assuming independence roughly halves the apparent
 survival on real Chicago data.
 
-**The personal mode** (`internal/personal/`). `personalMode` in
-`internal/modes/personal.go` ships *empty* — three queries over the `_csq`
-schema and no concepts — and `csq modes personal "<question>"` replaces it with
-a drafted file. Shipping it concept-free is load-bearing twice over: a mode with
-concepts and no binding cannot run, and `modes_test.go` fails the build for one.
+**Patterns** (`internal/patterns/`) are how the `personal` mode is filled in.
+A pattern is a reviewed SQL template written against canonical role names
+(`entity`, `measure`, `event_date`, ...) that the generated binding maps onto
+the portal's real columns — the same indirection every other mode uses. The
+output goes through the same loader, guard, and `EXPLAIN` as a hand-written
+mode, and `patterns_test.go` asserts that rather than trusting it.
 
-The model authors a mode; it never answers a question. It sees a schema
-inventory (`catalog.go`) and returns two documents; DuckDB produces every number
-the user sees, from SQL they can read. Four gates stand between a draft and the
-disk, cheapest first — the read-only guard and inventory cross-check
-(`guard.go`, `author.go`), the loader's own validation, then `EXPLAIN` on every
-new query (`save.go`). The last one is the only check that can prove the SQL
-resolves against the columns it claims to read, and a failure rolls both files
-back rather than leaving a half-saved mode behind.
+csq makes no network call to build one. There is no model anywhere in this
+path; `internal/llm` and `internal/cache` existed for an earlier drafted
+version and were removed with it.
 
-Two invariants in that package are easy to break and worth stating:
-
-- **The guard has to accept ordinary analytical SQL.** Its denied words are
-  common English, and civic data is full of them, so it scans SQL with literals
-  and comments blanked out — a vendor named `Create Update Systems Inc` is not a
-  DDL statement. A guard that rejects real queries gets turned off.
-- **A merge never overwrites the user's file.** Existing prose, concepts, query
-  bodies, and column mappings win every conflict; a colliding draft is renamed
-  rather than dropped. The file is the artefact the user owns, and the next
-  question they ask must not revert an edit they made.
-
-**Patterns** (`internal/patterns/`) are the offline half of the personal mode,
-and the default one: `csq modes add` needs no API key, no network, and no
-model. A pattern is a reviewed SQL template written against canonical role
-names (`entity`, `measure`, `event_date`, ...) that the generated binding maps
-onto the portal's real columns — the same indirection every other mode uses.
-
-The output is byte-for-byte the kind of document `personal` drafts, and goes
-through the same loader, guard, and `EXPLAIN`. That equivalence is the point,
-and `patterns_test.go` asserts it rather than trusting it.
-
-`ask.go` is the keyword router that puts an English question in front of them,
-and it is the default path precisely because it needs no credential. It is not
-NL-to-SQL: it ranks six shapes and the columns of one table, shows the word
-behind every choice, and refuses when it cannot choose. The worst it can do is
-pick the wrong reviewed template — never invent one. Watch the role-assignment
-order in `Suggest`: roles are filled greedily in `Params` order with no column
-reused, and a scorer that lets `vendor_name` win the *group* role produces a
-query that runs and answers a different question.
+`ask.go` is the keyword router that puts an English question in front of the
+patterns. It is not NL-to-SQL: it ranks six shapes and the columns of one
+table, shows the word behind every choice, and refuses when it cannot choose.
+The worst it can do is pick the wrong reviewed template — never invent one.
+Watch the role-assignment order in `Suggest`: roles are filled greedily in
+`Params` order with no column reused, and a scorer that lets `vendor_name` win
+the *group* role produces a query that runs and answers a different question.
 
 Three rules hold here:
 
-- **Nothing is inferred from a column's name.** The user says which column
-  plays which role. Guessing that `amount` is the measure is exactly the
-  mistake the whole offline path exists to avoid — and it is the one an LLM
-  makes silently.
+- **A role is filled on evidence, never on type alone.** `csq modes add` takes
+  the columns from the user outright. `ask` may propose one, but only when the
+  column matches that role's own vocabulary — Chicago supplies `crimes.id`,
+  `crimes.ward` and `requests_311.community_area`, all numeric and all
+  meaningless to sum, and each was picked at some point before that rule.
 - **Casts come from the declared type.** A `VARCHAR` measure is wrapped in
   `TRY_CAST` (one bad row becomes a NULL the confidence score counts, rather
   than a failed query); a text date is *refused* without `--date-format`,
@@ -153,41 +126,6 @@ Three rules hold here:
   free-text entity column always understates concentration. Written once and
   reviewed, they beat regenerated ones. `patterns_test.go` fails a pattern
   that ships without them.
-
-**The draft cache** (`internal/cache/`). csq caches the model's reply and never
-a query result. A draft is code and means the same thing tomorrow; a result is
-data the portal may have revised, and reusing one would defeat the confidence
-scores. `csq modes run` always re-executes.
-
-Two rules keep it honest, and both are easy to erode:
-
-- **The fingerprint must cover every input that can change a draft.** It is
-  built in `personal/author.go`, next to the prompt it fingerprints, precisely
-  so that adding an input to the prompt and forgetting it here is hard. Leave
-  one out and the result is not a smaller key — it is a cache that hands back
-  SQL written for a schema that no longer exists.
-- **A hit skips the network call and nothing else.** The cache stores the raw
-  reply, so a cached draft re-enters parsing, the guard, the cross-check, the
-  loader, and `EXPLAIN` exactly as a fresh one does. Caching the *checked* draft
-  would turn the cache into a way to skip the checks.
-
-The store bounds itself on write (`Enforce` from `Put`), evicting
-least-recently-used past 200 entries or 32 MB. Bounding on write rather than on
-a schedule is deliberate: a cache that only shrinks when someone remembers to
-prune grows without limit in practice, and a write is exactly when its size is
-known to have changed. Entries carry the token cost of the call that produced
-them, so `Stats` can report the saving as a number — an uncosted entry
-contributes zero, understating the benefit rather than inventing one.
-
-Miss, stale, and corrupt are distinct states with distinct reasons, for the same
-reason "could not measure" and "measured zero" are distinct elsewhere. Staleness
-is normal and explains itself; corruption means an entry is damaged or lying
-about itself, which is what `csq cache verify` looks for. There is no expiry on
-read — the fingerprint, not the clock, decides.
-
-One trap worth knowing: `json.MarshalIndent` re-indents an embedded
-`json.RawMessage`, so a payload stored that way never round-trips byte-exactly
-and its checksum fails on every read. The payload is a `string` for that reason.
 
 ## Conventions
 

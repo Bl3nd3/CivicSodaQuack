@@ -1,7 +1,8 @@
 // Copyright (c) 2026 Neomantra Corp
 
 // Package patterns builds modes from analysis shapes rather than from a
-// question, so a user can author one with no API key, no network, and no model.
+// question. Everything it needs is the schema of tables already held, so
+// building a mode makes no network call of any kind.
 //
 // The observation behind it is that most civic analysis is a handful of shapes.
 // "Which vendors got the most money", "which contractors pull the most permits",

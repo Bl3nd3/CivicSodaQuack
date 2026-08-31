@@ -138,7 +138,7 @@ Modes are curated analysis profiles: for a given civic question, the datasets wo
 | `ranking` | cross-portal | Comparison of portal breadth, category coverage, how much you hold locally, and freshness |
 | `police` | single portal | Civilian oversight — COPA/BIA complaint volume, finding and category outcomes, complainant demographics, officer tenure, shootings, beat distribution |
 | `research` | cross-portal | Provenance for citation, failed-run and coverage gaps, schema inventory, candidate join keys, and generated data-quality checks |
-| `personal` | cross-portal | Your own mode. Ships empty — an inventory of what you hold — until you fill it with `csq modes add` (patterns, no API key) or `csq modes personal "<question>"` (drafted by Claude) |
+| `personal` | cross-portal | Your own mode. Ships empty — an inventory of what you hold — until you fill it with `csq modes ask "<question>"` or `csq modes add <pattern>` |
 
 For a mode with datasets, generate a config and sync it, then run the queries:
 
@@ -195,15 +195,14 @@ An external mode **replaces a built-in of the same name**, so you can fix or ext
 
 ### The `personal` mode
 
-`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. There are two ways to fill it in, and **the default one needs no API key, no network, and no model at all**. Both produce the same JSON, checked the same way.
+`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. Two ways to fill it in — ask in English, or name the shape and columns yourself. Both produce the same JSON, checked the same way, and **neither makes a network call**.
 
-| | Command | Needs a key? |
-| --- | --- | --- |
-| Ask in English | `csq modes ask "<question>" --db <file>` | No |
-| Pick a shape yourself | `csq modes add <pattern> --db <file> ...` | No |
-| Have Claude draft it | `csq modes personal "<question>" --db <file>` | Yes |
+| | Command |
+| --- | --- |
+| Ask in English | `csq modes ask "<question>" --db <file>` |
+| Pick a shape yourself | `csq modes add <pattern> --db <file> ...` |
 
-#### Asking a question — no API key required
+#### Asking a question
 
 ```bash
 ./csq modes ask "which vendors got the most money?" --db chicago.duckdb
@@ -220,7 +219,7 @@ An external mode **replaces a built-in of the same name**, so you can fix or ext
   Use this?  [Y]es  [n]o  [e]dit as a command
 ```
 
-No model, no network, no credentials. csq matches your question against its analysis patterns and the columns of the tables you actually hold, using keyword scoring over your own schema.
+csq matches your question against its analysis patterns and the columns of the tables you actually hold, using keyword scoring over your own schema. It runs entirely on your machine.
 
 This works because the answer space is tiny. csq is **not** translating your question into arbitrary SQL — that is the brittle approach, where a plausible-looking wrong query is the failure mode. It is choosing among six reviewed shapes and the columns of one table, which is a ranking problem over a few dozen candidates. Three rules keep it honest:
 
@@ -253,87 +252,11 @@ Press `e` and it prints the equivalent `csq modes add` command, so correcting on
 | `coverage` | How populated each column is — the due-diligence pass before trusting anything else |
 | `name-variants` | One organisation recorded under several spellings |
 
-Each `modes add` appends to the mode, so you build it up a query at a time. Merging is deterministic and your file always wins, exactly as with drafting.
+Each `modes add` appends to the mode, so you build it up a query at a time. Merging is deterministic and your file always wins every conflict, so an edit you made survives the next question you ask.
 
 Two things patterns handle that are easy to get wrong by hand. **Casts come from the declared column type, not the column's name** — civic portals publish money as `VARCHAR` constantly, and the generated binding wraps it in `TRY_CAST` so one unparseable row is excluded and counted against the confidence score rather than killing the query. And **a text date column is refused unless you pass `--date-format`**, because guessing between `MM/DD/YYYY` and `DD/MM/YYYY` mislabels a third of the year without ever raising an error.
 
-The real advantage over drafting is the caveats. The ones that matter most are properties of the *shape*, not the data — a top-N ranking always hides its tail, a free-text entity column always understates concentration because the same body appears under several spellings, a count by month is always distorted by a partial final month. Written once against the pattern, they are reviewed prose rather than something regenerated per run.
-
-#### Drafting from a question — needs an API key
-
-Ask in English and csq drafts the mode for you:
-
-```bash
-./csq modes personal "which vendors got the most money last year?" \
-    --db data.cityofchicago.org.duckdb
-```
-
-csq reads your database's schema — table names, column names, and types — sends that to Claude with the same JSON Schema `csq modes schema` prints, and asks for concepts, SQL, and caveats. What comes back is checked before it is kept:
-
-1. every query must be a single read-only `SELECT` (no DDL, no DML, no `ATTACH`/`COPY`/`INSTALL`, no file-reading functions like `read_csv`);
-2. every bound table and plain column mapping must exist in *your* database, not in the model's recollection;
-3. the files must pass the same loader that validates a hand-written mode;
-4. DuckDB must be able to plan every new query.
-
-Fail any of these and nothing is saved. Pass them and you get two JSON files in your modes directory, and `personal` becomes an ordinary mode — same runner, same bindings, same confidence scores:
-
-```bash
-./csq modes show personal                              # read the SQL it wrote
-./csq modes run  personal --db data.cityofchicago.org.duckdb
-```
-
-Ask another question and the queries are **appended**. Merging is deterministic and your file wins every conflict, so a caveat you sharpened or a column mapping you corrected survives the next question. Editing the file is expected, not a workaround.
-
-Useful flags: `--dry-run` prints the draft without saving it, `--as <name>` builds a separate named mode instead of `personal`, `--run` executes the new queries immediately, and `--samples` also sends a few distinct values from low-cardinality text columns — which is how a generated filter learns the portal writes `STREETS & SAN` rather than `Streets and Sanitation`.
-
-#### The draft cache
-
-Drafting is the only billed step in csq, so the reply is cached. Ask the same question twice and the second time is free, offline, and instant.
-
-```bash
-./csq cache            # what is cached, how old, how often reused
-./csq cache verify     # check every entry parses, checksums, and matches its own inputs
-./csq cache show 1     # one entry's inputs and the drafted JSON
-./csq cache prune --older-than 30d
-./csq cache clear
-```
-
-**csq caches what the model drafted, never what a query returned.** A draft is code: given the same question, schema, prompt and model, it means the same thing tomorrow. A query result is *data*, and reusing one would put a figure on screen the portal may since have revised — so `csq modes run` always re-executes against DuckDB.
-
-An entry is reused only when **every** input still matches: the question, the model, the effort, csq's authoring instructions, the mode-file schema, the tables you hold (their columns, their types, and any sampled values), and the mode already on disk. Change one and the entry is reported stale *with the reason*, so you can see why you are paying for a question you already asked:
-
-```
-[csq] a draft for this question was cached 3 hours ago but no longer applies:
-        - the tables you hold changed — a column, a type, or a sampled value differs
-```
-
-Two properties follow from how it is built. A cache hit **skips the network call and nothing else** — the read-only guard, the inventory cross-check, the loader's validation and `EXPLAIN` all still run, so a cached draft is never trusted more than a fresh one. And because a hit makes no call, it needs **no API key and no confirmation**: csq checks the cache before it asks permission to contact anything.
-
-There is deliberately no expiry. A draft whose every input is unchanged is exactly as valid a year later — the fingerprint, not the clock, is what makes one stale. The one input the fingerprint cannot see is the model itself changing behind a stable id; `--refresh` is the escape hatch, and `--no-cache` bypasses the cache entirely.
-
-**Bounded by default.** The store holds at most 200 entries or 32 MB, whichever binds first, and evicts least-recently-used on write — so it bounds itself rather than waiting for someone to remember to prune. Recency of *use*, not of writing: a draft written months ago and used yesterday is worth more than one written yesterday and never used again. Raise, lower, or remove the ceilings with `CSQ_CACHE_MAX_ENTRIES` and `CSQ_CACHE_MAX_BYTES` (`0` means unbounded), or reclaim space now without changing the standing limits:
-
-```bash
-./csq cache prune --older-than 7d --max-entries 50 --max-bytes 8MB
-```
-
-**Token accounting.** Each entry records what its call cost, so `csq cache stats` reports the saving as a number rather than a claim:
-
-```
-  entries        12  (of 200)
-  on disk        148.2 KB  (of 32.0 MB)
-  reuses         31  (model calls not made)
-  tokens stored  184,220  (what it cost to produce what is held)
-  tokens saved   511,940  (what reuse avoided re-paying)
-```
-
-Entries written before token accounting existed contribute nothing, which understates the saving rather than inventing one.
-
-Three things worth being clear about:
-
-- **This is the only part of csq that talks to the network at analysis time**, and the only part that needs an `ANTHROPIC_API_KEY` (or a profile from `ant auth login`). Every other mode runs entirely locally. csq states what it is about to send and asks before sending it; `--yes` skips the prompt.
-- **No rows leave your machine unless you pass `--samples`.** The model sees a schema, never a result. It does not execute anything and does not produce any number you are shown — DuckDB does, from SQL you can read.
-- **The model chose which columns to trust, and it can misread what a column means.** csq can prove a query is read-only, valid, and planable; it cannot prove the query measures what you meant. Every drafted mode carries a caveat saying so, and it is not removable. Read the SQL before quoting a result.
+The caveats are what make a pattern more than a shortcut. The ones that matter most are properties of the *shape*, not the data — a top-N ranking always hides its tail, a free-text entity column always understates concentration because the same body appears under several spellings, a count by month is always distorted by a partial final month. Written once against the pattern, they are reviewed prose rather than something regenerated per run.
 
 ### Confidence scores
 

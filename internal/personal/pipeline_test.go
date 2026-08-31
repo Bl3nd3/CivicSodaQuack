@@ -3,31 +3,24 @@
 package personal
 
 import (
-	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	_ "github.com/duckdb/duckdb-go/v2"
 
-	"github.com/neomantra/CivicSodaQuack/internal/cache"
-	"github.com/neomantra/CivicSodaQuack/internal/llm"
 	"github.com/neomantra/CivicSodaQuack/internal/modes"
 )
 
-// This is the whole personal-mode pipeline with the model taken out: a real
-// DuckDB file, a real inventory read off it, the exact JSON documents a draft
-// produces, saved through the real loader, planned by DuckDB, and finally
-// executed. Only the API call is absent, and what it returns is a Draft — which
-// is what the fixture below stands in for.
+// The whole save-and-verify path against a real DuckDB file: an inventory read
+// off it, the documents a mode is made of, saved through the real loader,
+// planned by DuckDB, and finally executed.
 //
-// The value of running it this way is that every step that can reject a
-// drafted mode is exercised on real data: it is the difference between
-// "the code compiles" and "a generated mode actually runs".
+// The value of running it this way is that every step that can reject a mode is
+// exercised on real data — the difference between "the code compiles" and "the
+// mode actually runs".
 
 const testPortal = "data.example.gov"
 
@@ -144,9 +137,8 @@ func TestSampleColumnsReadsRealValues(t *testing.T) {
 	}
 }
 
-// draftFor is the fixture standing in for the model's reply: the two documents
-// Author would return, using an expression mapping to absorb the VARCHAR money
-// column and the text date.
+// draftFor is the fixture: the two documents a built mode consists of, using an
+// expression mapping to absorb the VARCHAR money column and the text date.
 func draftFor(modeName string) *Draft {
 	return &Draft{
 		Mode: &Document{
@@ -203,10 +195,8 @@ func TestPipeline_DraftIsSavedValidatedAndRuns(t *testing.T) {
 		t.Fatalf("describe: %v", err)
 	}
 
+	_ = inv
 	d := draftFor(modeName)
-	if err := d.check(inv); err != nil {
-		t.Fatalf("draft check: %v", err)
-	}
 
 	paths := PathsFor(dir, modeName, testPortal)
 	if _, err := Save(dir, d, paths); err != nil {
@@ -256,124 +246,6 @@ func TestPipeline_DraftIsSavedValidatedAndRuns(t *testing.T) {
 	// 1200000.50 + 800000 — proof the VARCHAR column was really cast.
 	if total != 2000000.50 {
 		t.Errorf("total = %v, want 2000000.5", total)
-	}
-}
-
-// The cache's headline property, proved without touching the API: a draft
-// already on disk is served with no client at all.
-//
-// That is what makes a cache hit free in every sense — no call, no credential,
-// no network — and it is why the CLI peeks before it asks permission to contact
-// anything.
-func TestCache_ServesADraftOfflineWithNoClient(t *testing.T) {
-	host := attachReadOnly(t, buildTestDB(t), "p")
-
-	inv, err := Describe(host, "p", testPortal)
-	if err != nil {
-		t.Fatalf("describe: %v", err)
-	}
-	store, err := cache.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("cache: %v", err)
-	}
-
-	cfg := llm.Config{Model: "claude-opus-5", Effort: "high"}
-	req := Request{
-		Question: "which vendors got the most money?",
-		ModeName: "cache-test",
-		Portal:   inv,
-		City:     "Example, EX",
-		Cache:    store,
-	}
-
-	// Seed the store with exactly the bytes a model would have returned.
-	payload, err := json.Marshal(draftFor("cache-test"))
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	fp := Fingerprint(req, cfg, systemPrompt(), draftSchema())
-	if _, err := store.Put(fp, req.Question, payload, cache.Cost{}); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-
-	if v := Peek(cfg, req); !v.Hit() {
-		t.Fatalf("the seeded entry should hit, got %s (%v)", v.State, v.Reasons)
-	}
-
-	// A nil client is the point: reaching the model here would be a nil
-	// dereference, so a pass proves no call was attempted.
-	draft, outcome, err := Author(context.Background(), nil, cfg, req)
-	if err != nil {
-		t.Fatalf("author from cache: %v", err)
-	}
-	if !outcome.Cached {
-		t.Error("the draft should be reported as cached")
-	}
-	if len(draft.Mode.Queries) != 1 || draft.Mode.Queries[0].Name != "top-vendors" {
-		t.Errorf("the cached draft came back wrong: %+v", draft.Mode.Queries)
-	}
-	// The checks still ran: the provenance caveat is applied to a cached draft
-	// exactly as to a fresh one.
-	var hasProvenance bool
-	for _, c := range draft.Mode.Caveats {
-		if c == GeneratedCaveat {
-			hasProvenance = true
-		}
-	}
-	if !hasProvenance {
-		t.Error("a cached draft must still get the provenance caveat")
-	}
-}
-
-// A cached draft must not survive a schema change. The old SQL may still plan
-// while meaning something different, which is the failure a cache can cause
-// that a missing cache never can.
-func TestCache_SchemaChangeInvalidatesTheDraft(t *testing.T) {
-	host := attachReadOnly(t, buildTestDB(t), "p")
-	inv, err := Describe(host, "p", testPortal)
-	if err != nil {
-		t.Fatalf("describe: %v", err)
-	}
-	store, err := cache.Open(t.TempDir())
-	if err != nil {
-		t.Fatalf("cache: %v", err)
-	}
-
-	cfg := llm.Config{Model: "claude-opus-5", Effort: "high"}
-	req := Request{
-		Question: "which vendors got the most money?",
-		ModeName: "cache-test",
-		Portal:   inv,
-		Cache:    store,
-	}
-	payload, _ := json.Marshal(draftFor("cache-test"))
-	fp := Fingerprint(req, cfg, systemPrompt(), draftSchema())
-	if _, err := store.Put(fp, req.Question, payload, cache.Cost{}); err != nil {
-		t.Fatalf("put: %v", err)
-	}
-
-	// A column appears, as it would after a resync against a changed dataset.
-	changed := *inv
-	changed.Tables = append([]Table(nil), inv.Tables...)
-	changed.Tables[0].Columns = append(
-		append([]Column(nil), inv.Tables[0].Columns...),
-		Column{Name: "award_date", Type: "DATE"},
-	)
-	moved := req
-	moved.Portal = &changed
-
-	v := Peek(cfg, moved)
-	if v.State != cache.StateStale {
-		t.Fatalf("a new column should make the entry stale, got %s", v.State)
-	}
-	if !strings.Contains(strings.Join(v.Reasons, " "), "tables you hold changed") {
-		t.Errorf("the reason should name the schema change, got %v", v.Reasons)
-	}
-
-	// And with no client available, Author must say so plainly rather than
-	// silently serving the stale draft.
-	if _, _, err := Author(context.Background(), nil, cfg, moved); err == nil {
-		t.Error("a stale entry with no client should be an error, not a silent reuse")
 	}
 }
 
