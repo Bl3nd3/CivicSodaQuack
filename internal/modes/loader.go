@@ -21,10 +21,10 @@ import (
 //
 // Both YAML and JSON are accepted, and they are the same document — the fields,
 // the validation, and the error messages do not vary by extension. YAML is
-// pleasant to hand-write; JSON is what a program emits, which is how the
-// personal mode writes a profile an LLM authored. Anything one can express the
-// other can too, so a generated file stays editable by hand and a hand-written
-// file stays machine-readable.
+// pleasant to hand-write; JSON is what a program emits, which is how `csq modes
+// ask` and `csq modes add` write a profile. Anything one can express the other
+// can too, so a generated file stays editable by hand and a hand-written file
+// stays machine-readable.
 //
 // Validation is deliberately strict and the messages are written for someone
 // who is not a Go programmer: unknown keys are rejected rather than silently

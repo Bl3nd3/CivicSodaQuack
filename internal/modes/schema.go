@@ -12,14 +12,14 @@ import (
 //
 //   - `csq modes schema` prints it, so someone writing a file by hand can see
 //     the exact shape rather than reverse-engineering it from an example.
-//   - The personal mode hands it to the model as a structured-output schema, so
-//     an LLM-authored mode is constrained to the same grammar a human writes.
+//   - `csq modes ask` and `csq modes add` write against it, so a generated mode
+//     is held to the same grammar a person writes by hand.
 //   - The loader validates against the same field set, so a file that satisfies
 //     the schema and a file that satisfies the loader cannot drift apart.
 //
 // A second, hand-maintained copy of this shape would be the obvious way to do
-// it and the obvious way for the three to disagree — at which point the model
-// emits documents csq rejects, and the error lands on the user.
+// it and the obvious way for the three to disagree — at which point csq
+// generates documents its own loader rejects, and the error lands on the user.
 //
 // Every object sets additionalProperties:false, matching the loader's
 // KnownFields/DisallowUnknownFields behaviour: a typo is an error at the point
