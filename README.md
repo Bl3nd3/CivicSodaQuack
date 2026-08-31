@@ -138,7 +138,7 @@ Modes are curated analysis profiles: for a given civic question, the datasets wo
 | `ranking` | cross-portal | Comparison of portal breadth, category coverage, how much you hold locally, and freshness |
 | `police` | single portal | Civilian oversight — COPA/BIA complaint volume, finding and category outcomes, complainant demographics, officer tenure, shootings, beat distribution |
 | `research` | cross-portal | Provenance for citation, failed-run and coverage gaps, schema inventory, candidate join keys, and generated data-quality checks |
-| `personal` | cross-portal | Your own mode. Ships empty — an inventory of what you hold — until `csq modes personal "<question>"` drafts queries for it |
+| `personal` | cross-portal | Your own mode. Ships empty — an inventory of what you hold — until you fill it with `csq modes add` (patterns, no API key) or `csq modes personal "<question>"` (drafted by Claude) |
 
 For a mode with datasets, generate a config and sync it, then run the queries:
 
@@ -195,7 +195,40 @@ An external mode **replaces a built-in of the same name**, so you can fix or ext
 
 ### The `personal` mode
 
-`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. Ask a question in English and csq drafts the mode for you:
+`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. There are two ways to fill it in. **Patterns need no API key and no network**; drafting needs both. Both produce the same JSON, checked the same way.
+
+#### Patterns — no API key required
+
+Most civic analysis is a handful of shapes. "Which vendors got the most money", "which contractors pull the most permits", "who receives the most contributions" are one shape — rank entities by a summed measure — pointed at different columns. csq ships those shapes as reviewed SQL templates with holes for the columns you name:
+
+```bash
+./csq modes patterns                      # the shapes available
+./csq modes patterns show top-n           # its SQL, parameters, and caveats
+./csq modes tables --db chicago.duckdb    # the columns you can point one at
+
+./csq modes add top-n --db chicago.duckdb --table contracts \
+    --entity vendor_name --measure award_amount
+./csq modes run personal --db chicago.duckdb
+```
+
+| Pattern | What it answers |
+| --- | --- |
+| `top-n` | Who got the most, by summed value |
+| `concentration` | Who takes an outsized share *within* a group — one vendor's share of one department's spend |
+| `trend` | Counts or sums by month over time |
+| `breakdown` | Counts and shares across a category |
+| `coverage` | How populated each column is — the due-diligence pass before trusting anything else |
+| `name-variants` | One organisation recorded under several spellings |
+
+Each `modes add` appends to the mode, so you build it up a query at a time. Merging is deterministic and your file always wins, exactly as with drafting.
+
+Two things patterns handle that are easy to get wrong by hand. **Casts come from the declared column type, not the column's name** — civic portals publish money as `VARCHAR` constantly, and the generated binding wraps it in `TRY_CAST` so one unparseable row is excluded and counted against the confidence score rather than killing the query. And **a text date column is refused unless you pass `--date-format`**, because guessing between `MM/DD/YYYY` and `DD/MM/YYYY` mislabels a third of the year without ever raising an error.
+
+The real advantage over drafting is the caveats. The ones that matter most are properties of the *shape*, not the data — a top-N ranking always hides its tail, a free-text entity column always understates concentration because the same body appears under several spellings, a count by month is always distorted by a partial final month. Written once against the pattern, they are reviewed prose rather than something regenerated per run.
+
+#### Drafting from a question — needs an API key
+
+Ask in English and csq drafts the mode for you:
 
 ```bash
 ./csq modes personal "which vendors got the most money last year?" \

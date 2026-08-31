@@ -30,6 +30,10 @@ Usage:
   csq modes run  <mode> --db <file> [--db ...] [--query NAME] [--limit N]
   csq modes lint <file> ...              Check an external mode or binding file
   csq modes schema                       Print the JSON Schema a mode file must match
+  csq modes patterns                     Analysis shapes you can build a mode from
+  csq modes tables --db <file>           Tables and columns a pattern can point at
+  csq modes add <pattern> --db <file> --table <name> [role flags]
+                                         Build a mode query from a pattern (no API key)
   csq modes personal "<question>" --db <file>
                                          Draft a mode from a question (uses Claude)
   csq modes where                        Show where external modes are loaded from
@@ -39,9 +43,12 @@ Modes and bindings can be added as YAML or JSON in ~/.csq/modes/ (override with
 same document: 'csq modes schema' prints the shape, and 'csq modes lint' checks
 a file before use. An external mode replaces a built-in of the same name.
 
-'csq modes personal' writes one of those files for you: it shows Claude the
-tables you hold — names, columns, and types, never the rows — and saves the
-drafted mode as JSON you can read and edit.
+There are two ways to have csq write one of those files for you. 'csq modes
+add' builds a query from a reviewed SQL pattern and the columns you name — no
+API key, no network, and the caveats come with the pattern. 'csq modes
+personal' instead shows Claude the tables you hold (names, columns, and types,
+never the rows) and asks it to draft one. Both produce the same JSON, checked
+the same way.
 
 Examples:
   csq modes
@@ -72,6 +79,12 @@ func runModes(args []string) error {
 		return lintModeFiles(args[1:])
 	case "schema":
 		return printModeSchema(os.Stdout)
+	case "patterns":
+		return runPatterns(args[1:])
+	case "tables":
+		return runModeTables(args[1:])
+	case "add":
+		return runModeAdd(args[1:])
 	case "personal":
 		return runPersonalMode(args[1:])
 	case "where":

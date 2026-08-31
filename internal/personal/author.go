@@ -278,7 +278,7 @@ func Author(ctx context.Context, c *llm.Client, cfg llm.Config, req Request) (*D
 	d.Mode.Caveats = appendUnique(d.Mode.Caveats, GeneratedCaveat)
 
 	if req.Existing != nil {
-		d.Mode = mergeMode(req.Existing, d.Mode)
+		d.Mode = MergeMode(req.Existing, d.Mode)
 	}
 	return &d, out, nil
 }
@@ -378,24 +378,44 @@ func isBareIdentifier(s string) bool {
 	return true
 }
 
-// mergeMode folds a new draft into the document already on disk.
+// MergeMode folds a new draft into the document already on disk.
 //
 // The existing file wins every conflict. A user who edited a caveat, renamed a
 // query, or corrected a column mapping must not have that work reverted by the
 // next question they ask — the model is extending their file, not owning it.
-func mergeMode(existing, drafted *Document) *Document {
+func MergeMode(existing, drafted *Document) *Document {
 	out := *existing
 	out.Kind = "mode"
 
-	seenConcept := map[string]bool{}
-	for _, c := range out.Concepts {
-		seenConcept[c.Name] = true
+	// Concepts are merged column-wise, not skipped wholesale. A second query
+	// against a table the mode already knows commonly needs one more column
+	// from it — a date to group by, a category to split on. Keeping only the
+	// existing concept would leave that column undeclared, and the query that
+	// reads it would then fail to load. The existing *wording* still wins; it
+	// is only the column lists that grow.
+	out.Concepts = append([]Concept(nil), out.Concepts...)
+	byName := map[string]int{}
+	for i, c := range out.Concepts {
+		byName[c.Name] = i
 	}
 	for _, c := range drafted.Concepts {
-		if !seenConcept[c.Name] {
+		i, ok := byName[c.Name]
+		if !ok {
 			out.Concepts = append(out.Concepts, c)
-			seenConcept[c.Name] = true
+			byName[c.Name] = len(out.Concepts) - 1
+			continue
 		}
+		existing := out.Concepts[i]
+		for _, col := range c.Required {
+			existing.Required = appendUnique(existing.Required, col)
+		}
+		for _, col := range c.Optional {
+			// A column already required must not be demoted to optional.
+			if !containsString(existing.Required, col) {
+				existing.Optional = appendUnique(existing.Optional, col)
+			}
+		}
+		out.Concepts[i] = existing
 	}
 
 	taken := map[string]bool{}
@@ -415,7 +435,7 @@ func mergeMode(existing, drafted *Document) *Document {
 }
 
 // MergeBinding folds a drafted binding into one already on disk, on the same
-// terms as mergeMode: what is there already stays.
+// terms as MergeMode: what is there already stays.
 func MergeBinding(existing, drafted *Document) *Document {
 	if existing == nil {
 		return drafted
@@ -426,9 +446,27 @@ func MergeBinding(existing, drafted *Document) *Document {
 		out.Datasets = map[string]DocDataset{}
 	}
 	for name, ds := range drafted.Datasets {
-		if _, ok := out.Datasets[name]; !ok {
+		prev, ok := out.Datasets[name]
+		if !ok {
 			out.Datasets[name] = ds
+			continue
 		}
+		// Same reasoning as concepts: a new query on a known table usually
+		// needs one more column mapped. Dropping the whole new dataset would
+		// leave that mapping missing, and because a non-empty columns map is
+		// authoritative, the column would read as unavailable rather than as
+		// simply unmapped. The user's existing mappings still win one by one.
+		if len(ds.Columns) > 0 {
+			if prev.Columns == nil {
+				prev.Columns = map[string]string{}
+			}
+			for canonical, expr := range ds.Columns {
+				if _, taken := prev.Columns[canonical]; !taken {
+					prev.Columns[canonical] = expr
+				}
+			}
+		}
+		out.Datasets[name] = prev
 	}
 	for _, n := range drafted.Notes {
 		out.Notes = appendUnique(out.Notes, n)
@@ -446,6 +484,15 @@ func uniqueName(name string, taken map[string]bool) string {
 			return candidate
 		}
 	}
+}
+
+func containsString(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 func appendUnique(list []string, s string) []string {

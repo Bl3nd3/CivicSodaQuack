@@ -18,6 +18,7 @@ internal/
   duckdb/          connection helpers and the `_csq` bookkeeping schema
   portallock/      advisory <dbpath>.lock (flock) shared by every subcommand
   modes/           curated analysis profiles: concepts, bindings, queries, caveats
+  patterns/        builds a mode from reviewed SQL shapes — no model, no network
   personal/        drafts a mode from a question: schema inventory, SQL guard, merge
   llm/             the one Anthropic call csq makes, constrained to a JSON schema
   cache/           drafted replies on disk, with the fingerprint that invalidates them
@@ -117,6 +118,32 @@ Two invariants in that package are easy to break and worth stating:
   bodies, and column mappings win every conflict; a colliding draft is renamed
   rather than dropped. The file is the artefact the user owns, and the next
   question they ask must not revert an edit they made.
+
+**Patterns** (`internal/patterns/`) are the offline half of the personal mode,
+and the default one: `csq modes add` needs no API key, no network, and no
+model. A pattern is a reviewed SQL template written against canonical role
+names (`entity`, `measure`, `event_date`, ...) that the generated binding maps
+onto the portal's real columns — the same indirection every other mode uses.
+
+The output is byte-for-byte the kind of document `personal` drafts, and goes
+through the same loader, guard, and `EXPLAIN`. That equivalence is the point,
+and `patterns_test.go` asserts it rather than trusting it.
+
+Three rules hold here:
+
+- **Nothing is inferred from a column's name.** The user says which column
+  plays which role. Guessing that `amount` is the measure is exactly the
+  mistake the whole offline path exists to avoid — and it is the one an LLM
+  makes silently.
+- **Casts come from the declared type.** A `VARCHAR` measure is wrapped in
+  `TRY_CAST` (one bad row becomes a NULL the confidence score counts, rather
+  than a failed query); a text date is *refused* without `--date-format`,
+  because MM/DD versus DD/MM mislabels a third of the year without erroring.
+- **A pattern's caveats are its reason to exist.** The limits that matter most
+  are properties of the shape, not the data — a top-N always hides its tail, a
+  free-text entity column always understates concentration. Written once and
+  reviewed, they beat regenerated ones. `patterns_test.go` fails a pattern
+  that ships without them.
 
 **The draft cache** (`internal/cache/`). csq caches the model's reply and never
 a query result. A draft is code and means the same thing tomorrow; a result is

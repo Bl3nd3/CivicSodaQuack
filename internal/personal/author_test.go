@@ -193,7 +193,7 @@ func TestMergeMode_KeepsWhatTheUserAlreadyHas(t *testing.T) {
 		Caveats: []string{"My own caveat.", "A new caveat."},
 	}
 
-	out := mergeMode(existing, drafted)
+	out := MergeMode(existing, drafted)
 
 	if out.Title != "My title" || out.About != "My about" {
 		t.Error("the user's prose should survive a merge")
