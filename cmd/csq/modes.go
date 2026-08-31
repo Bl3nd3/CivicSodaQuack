@@ -181,11 +181,22 @@ func showMode(args []string) error {
 		fmt.Fprintf(out, "\nConcepts: none — this mode reads the _csq schema of databases you already have.\n")
 	}
 
+	// The SQL is printed, not just described. Several of this tool's own
+	// caveats tell the reader to check the query behind a number before
+	// quoting it, and for a while this command showed only the description —
+	// which made that instruction impossible to follow. A mode is meant to be
+	// auditable; the audit is the SQL.
 	fmt.Fprintf(out, "\nQueries (%d):\n", len(m.Queries))
 	for _, q := range m.Queries {
 		fmt.Fprintf(out, "\n  %s\n", q.Name)
 		for _, line := range wrapText(q.Desc, 70) {
 			fmt.Fprintf(out, "      %s\n", line)
+		}
+		if q.Entity != "" && q.Measure != "" {
+			fmt.Fprintf(out, "      concentration: %s by %s\n", q.Measure, q.Entity)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(q.SQL), "\n") {
+			fmt.Fprintf(out, "      │ %s\n", line)
 		}
 	}
 
