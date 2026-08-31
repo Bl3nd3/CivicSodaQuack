@@ -195,11 +195,44 @@ An external mode **replaces a built-in of the same name**, so you can fix or ext
 
 ### The `personal` mode
 
-`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. There are two ways to fill it in. **Patterns need no API key and no network**; drafting needs both. Both produce the same JSON, checked the same way.
+`personal` is the mode you write for yourself, and the only built-in that expects to be replaced. There are two ways to fill it in, and **the default one needs no API key, no network, and no model at all**. Both produce the same JSON, checked the same way.
 
-#### Patterns — no API key required
+| | Command | Needs a key? |
+| --- | --- | --- |
+| Ask in English | `csq modes ask "<question>" --db <file>` | No |
+| Pick a shape yourself | `csq modes add <pattern> --db <file> ...` | No |
+| Have Claude draft it | `csq modes personal "<question>" --db <file>` | Yes |
 
-Most civic analysis is a handful of shapes. "Which vendors got the most money", "which contractors pull the most permits", "who receives the most contributions" are one shape — rank entities by a summed measure — pointed at different columns. csq ships those shapes as reviewed SQL templates with holes for the columns you name:
+#### Asking a question — no API key required
+
+```bash
+./csq modes ask "which vendors got the most money?" --db chicago.duckdb
+```
+
+```
+  question  which vendors got the most money?
+
+  pattern   top-n         — matched "most"
+  table     contracts     — it has a column matching "vendor"
+  entity    vendor_name   — matched "vendor" in your question
+  measure   award_amount  — matched "award" in your question
+
+  Use this?  [Y]es  [n]o  [e]dit as a command
+```
+
+No model, no network, no credentials. csq matches your question against its analysis patterns and the columns of the tables you actually hold, using keyword scoring over your own schema.
+
+This works because the answer space is tiny. csq is **not** translating your question into arbitrary SQL — that is the brittle approach, where a plausible-looking wrong query is the failure mode. It is choosing among six reviewed shapes and the columns of one table, which is a ranking problem over a few dozen candidates. Three rules keep it honest:
+
+- **It shows its reasoning.** Every choice comes back with the word that produced it, so a wrong guess is visible *before* anything is saved.
+- **It refuses rather than guesses.** A question it cannot place, or a role it cannot fill, comes back as a message telling you how to say it explicitly. It also warns when your question and the shape disagree — ask for the *least* and it will tell you the pattern ranks largest-first.
+- **It never writes SQL.** The worst it can do is pick the wrong template, and that template was still written and reviewed by a person.
+
+Press `e` and it prints the equivalent `csq modes add` command, so correcting one column is editing a line rather than rephrasing a question and hoping.
+
+#### Patterns — the shapes underneath
+
+`modes ask` is a front-end onto the patterns; you can also drive them directly, which is the reliable route when you know exactly what you want. Most civic analysis is a handful of shapes. "Which vendors got the most money", "which contractors pull the most permits", "who receives the most contributions" are one shape — rank entities by a summed measure — pointed at different columns. csq ships those shapes as reviewed SQL templates with holes for the columns you name:
 
 ```bash
 ./csq modes patterns                      # the shapes available

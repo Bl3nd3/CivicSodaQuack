@@ -267,32 +267,92 @@ func runModeAdd(args []string) error {
 			dbPath, table, strings.Join(inv.TableNames(), ", "))
 	}
 
-	draft, err := patterns.Build(patterns.BuildRequest{
-		Pattern:    p,
-		Table:      tbl,
-		Concept:    concept,
-		ModeName:   asName,
-		Portal:     portal,
-		City:       city,
-		QueryName:  queryName,
-		DateFormat: dateFormat,
-		Columns: map[patterns.Role]string{
-			patterns.RoleEntity:   entity,
-			patterns.RoleMeasure:  measure,
-			patterns.RoleDate:     date,
-			patterns.RoleCategory: category,
-			patterns.RoleGroup:    group,
+	return buildAndSave(buildAndSaveArgs{
+		Build: patterns.BuildRequest{
+			Pattern:    p,
+			Table:      tbl,
+			Concept:    concept,
+			ModeName:   asName,
+			Portal:     portal,
+			City:       city,
+			QueryName:  queryName,
+			DateFormat: dateFormat,
+			Columns: map[patterns.Role]string{
+				patterns.RoleEntity:   entity,
+				patterns.RoleMeasure:  measure,
+				patterns.RoleDate:     date,
+				patterns.RoleCategory: category,
+				patterns.RoleGroup:    group,
+			},
 		},
+		Host: host, Alias: alias, DBPath: dbPath,
+		ModeName: asName, Portal: portal,
+		DryRun: dryRun, RunNow: runNow,
 	})
+}
+
+// buildFromSuggestionArgs adapts a router suggestion onto the same build path
+// `csq modes add` uses, so the two commands cannot produce different files for
+// the same choices.
+type buildFromSuggestionArgs struct {
+	Suggestion *patterns.Suggestion
+	Host       *sql.DB
+	Alias      string
+	DBPath     string
+	ModeName   string
+	Portal     string
+	City       string
+	DateFormat string
+	DryRun     bool
+	RunNow     bool
+}
+
+func buildFromSuggestion(a buildFromSuggestionArgs) error {
+	cols := map[patterns.Role]string{}
+	for role, col := range a.Suggestion.Columns {
+		cols[role] = col
+	}
+	return buildAndSave(buildAndSaveArgs{
+		Build: patterns.BuildRequest{
+			Pattern:    a.Suggestion.Pattern,
+			Table:      a.Suggestion.Table,
+			ModeName:   a.ModeName,
+			Portal:     a.Portal,
+			City:       a.City,
+			DateFormat: a.DateFormat,
+			Columns:    cols,
+		},
+		Host: a.Host, Alias: a.Alias, DBPath: a.DBPath,
+		ModeName: a.ModeName, Portal: a.Portal,
+		DryRun: a.DryRun, RunNow: a.RunNow,
+	})
+}
+
+type buildAndSaveArgs struct {
+	Build    patterns.BuildRequest
+	Host     *sql.DB
+	Alias    string
+	DBPath   string
+	ModeName string
+	Portal   string
+	DryRun   bool
+	RunNow   bool
+}
+
+// buildAndSave is the one place a pattern becomes files on disk: build, merge
+// into whatever is already there, save through the loader, and make DuckDB
+// prove the new query resolves before it is kept.
+func buildAndSave(a buildAndSaveArgs) error {
+	draft, err := patterns.Build(a.Build)
 	if err != nil {
 		return err
 	}
 
 	dir := modesDir()
-	paths := personal.PathsFor(dir, asName, portal)
+	paths := personal.PathsFor(dir, a.ModeName, a.Portal)
 
-	// Merge into whatever is already there, on the same terms as the drafted
-	// path: the user's file wins every conflict.
+	// Merge on the same terms as the drafted path: the user's file wins every
+	// conflict, so an edit they made survives the next question they ask.
 	existingMode, err := personal.LoadExisting(paths.Mode)
 	if err != nil {
 		return err
@@ -313,7 +373,7 @@ func runModeAdd(args []string) error {
 	}
 	draft.Binding = personal.MergeBinding(existingBinding, draft.Binding)
 
-	if dryRun {
+	if a.DryRun {
 		return printDraft(draft)
 	}
 
@@ -321,25 +381,26 @@ func runModeAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	if problems := personal.VerifyQueries(host, asName, alias, portal, newQueries); len(problems) > 0 {
+	if problems := personal.VerifyQueries(a.Host, a.ModeName, a.Alias, a.Portal, newQueries); len(problems) > 0 {
 		rollback()
 		fmt.Fprintf(os.Stderr, "\n[csq] nothing was saved: the generated query would not run\n")
 		for _, pr := range problems {
 			fmt.Fprintf(os.Stderr, "  %s\n      %v\n", pr.Query, pr.Err)
 		}
-		return fmt.Errorf("check the columns you named against 'csq modes tables --db %s'", dbPath)
+		return fmt.Errorf("check the columns against 'csq modes tables --db %s'", a.DBPath)
 	}
 
-	fmt.Fprintf(os.Stderr, "[csq] added %s to %s\n", strings.Join(sortedKeys(newQueries), ", "), paths.Mode)
+	fmt.Fprintf(os.Stderr, "[csq] added %s to %s\n",
+		strings.Join(sortedKeys(newQueries), ", "), paths.Mode)
 	fmt.Fprintf(os.Stderr, "[csq] binding      %s\n", paths.Binding)
-	fmt.Fprintf(os.Stderr, "\n  read it:  csq modes show %s\n", asName)
-	fmt.Fprintf(os.Stderr, "  run it:   csq modes run %s --db %s\n\n", asName, dbPath)
+	fmt.Fprintf(os.Stderr, "\n  read it:  csq modes show %s\n", a.ModeName)
+	fmt.Fprintf(os.Stderr, "  run it:   csq modes run %s --db %s\n\n", a.ModeName, a.DBPath)
 
-	if !runNow {
+	if !a.RunNow {
 		return nil
 	}
 	for _, name := range sortedKeys(newQueries) {
-		if err := runModeQueries([]string{asName, "--db", dbPath, "--query", name}); err != nil {
+		if err := runModeQueries([]string{a.ModeName, "--db", a.DBPath, "--query", name}); err != nil {
 			return err
 		}
 	}

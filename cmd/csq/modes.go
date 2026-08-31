@@ -85,6 +85,8 @@ func runModes(args []string) error {
 		return runModeTables(args[1:])
 	case "add":
 		return runModeAdd(args[1:])
+	case "ask":
+		return runModeAsk(args[1:])
 	case "personal":
 		return runPersonalMode(args[1:])
 	case "where":

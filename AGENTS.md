@@ -129,6 +129,15 @@ The output is byte-for-byte the kind of document `personal` drafts, and goes
 through the same loader, guard, and `EXPLAIN`. That equivalence is the point,
 and `patterns_test.go` asserts it rather than trusting it.
 
+`ask.go` is the keyword router that puts an English question in front of them,
+and it is the default path precisely because it needs no credential. It is not
+NL-to-SQL: it ranks six shapes and the columns of one table, shows the word
+behind every choice, and refuses when it cannot choose. The worst it can do is
+pick the wrong reviewed template — never invent one. Watch the role-assignment
+order in `Suggest`: roles are filled greedily in `Params` order with no column
+reused, and a scorer that lets `vendor_name` win the *group* role produces a
+query that runs and answers a different question.
+
 Three rules hold here:
 
 - **Nothing is inferred from a column's name.** The user says which column
