@@ -162,6 +162,101 @@ func TestSuggest_RefusesWhenNoTableCanAnswer(t *testing.T) {
 	}
 }
 
+// Both of the following come from running the router against Chicago's real
+// tables, where each produced a query that ran cleanly and reported a number
+// that meant nothing. That is the worst failure available to this code — worse
+// than refusing — so each has a test.
+
+// Chicago's 311 table has exactly one numeric column, community_area, which is
+// a geographic identifier. Filling the trend pattern's *optional* measure with
+// it yields a monthly sum of area numbers.
+func TestSuggest_OptionalRoleIsNotFilledByTypeAlone(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{{
+			Name: "requests_311", DatasetName: "311 Service Requests",
+			Columns: []personal.Column{
+				{Name: "sr_type", Type: "VARCHAR"},
+				{Name: "created_date", Type: "TIMESTAMP"},
+				{Name: "community_area", Type: "DOUBLE"}, // an id, not a quantity
+				{Name: "ward", Type: "DOUBLE"},           // likewise
+			},
+		}},
+	}
+	s, err := Suggest("how are 311 requests trending over time?", inv, "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if col, ok := s.Columns[RoleMeasure]; ok {
+		t.Errorf("measure should be left unset, got %q — summing it means nothing", col)
+	}
+}
+
+// Chicago's crimes table has fbi_code, a classification. A question mentioning
+// "type" reaches it through the category synonyms, and summing it produces
+// totals that look like real numbers.
+func TestSuggest_OptionalRoleIgnoresWrongKindOfNameMatch(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{{
+			Name: "crimes", DatasetName: "Crimes",
+			Columns: []personal.Column{
+				{Name: "primary_type", Type: "VARCHAR"},
+				{Name: "fbi_code", Type: "VARCHAR"}, // a classification, not a measure
+				{Name: "date", Type: "TIMESTAMP"},
+			},
+		}},
+	}
+	s, err := Suggest("what is the breakdown of crimes by primary type?", inv, "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if s.Columns[RoleCategory] != "primary_type" {
+		t.Errorf("category = %q, want primary_type", s.Columns[RoleCategory])
+	}
+	if col, ok := s.Columns[RoleMeasure]; ok {
+		t.Errorf("measure should be left unset, got %q — a code is not a quantity", col)
+	}
+}
+
+// Chicago's building_permits carries a dozen fee columns. Asked about "fees",
+// the one a person means is the unqualified total, not one component.
+func TestSuggest_PrefersTheLeastQualifiedName(t *testing.T) {
+	inv := &personal.Portal{
+		Alias: "p", Host: "h",
+		Tables: []personal.Table{{
+			Name: "building_permits", DatasetName: "Building Permits",
+			Columns: []personal.Column{
+				{Name: "permit_type", Type: "VARCHAR"},
+				// Declared before total_fee on purpose: order must not decide it.
+				{Name: "building_fee_paid", Type: "DOUBLE"},
+				{Name: "zoning_fee_paid", Type: "DOUBLE"},
+				{Name: "subtotal_paid", Type: "DOUBLE"},
+				{Name: "total_fee", Type: "DOUBLE"},
+			},
+		}},
+	}
+	s, err := Suggest("which permit types collect the most fees?", inv, "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if s.Columns[RoleMeasure] != "total_fee" {
+		t.Errorf("measure = %q, want total_fee", s.Columns[RoleMeasure])
+	}
+}
+
+// The tightening above must not stop a genuinely measure-shaped column from
+// filling an optional role.
+func TestSuggest_OptionalRoleStillFillsOnRealEvidence(t *testing.T) {
+	s, err := Suggest("how are permits trending over time?", inventory(), "")
+	if err != nil {
+		t.Fatalf("suggest: %v", err)
+	}
+	if s.Columns[RoleMeasure] != "estimated_cost" {
+		t.Errorf("measure = %q, want estimated_cost", s.Columns[RoleMeasure])
+	}
+}
+
 // An explicit --table must win over the router's own guess.
 func TestSuggest_HonoursAnExplicitTable(t *testing.T) {
 	s, err := Suggest("which columns are missing data?", inventory(), "permits")

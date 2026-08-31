@@ -273,8 +273,20 @@ func chooseColumn(terms []string, t personal.Table, param Param, used map[string
 		if used[strings.ToLower(c.Name)] {
 			continue
 		}
-		score, reason := scoreColumnForRole(terms, c, param)
+		score, reason, roleMatched := scoreColumnForRole(terms, c, param)
 		if score <= 0 {
+			continue
+		}
+		// An optional role must be *earned* by looking like that role, never
+		// filled because a column had the right type or happened to share a
+		// word with the question. Chicago supplies both failures: the 311 table
+		// has exactly one numeric column, community_area, whose sum is a
+		// meaningless number; and the crimes table has fbi_code, which a
+		// question about "type" reaches through the category synonyms.
+		//
+		// A missing optional column costs a user nothing. A meaningless one
+		// costs them a figure they might quote.
+		if !param.Required && !roleMatched {
 			continue
 		}
 		ranked = append(ranked, scored{c.Name, score, reason})
@@ -286,10 +298,17 @@ func chooseColumn(terms []string, t personal.Table, param Param, used map[string
 	return ranked[0].name, ranked[0].reason, true
 }
 
-func scoreColumnForRole(terms []string, c personal.Column, param Param) (float64, string) {
+// scoreColumnForRole returns the column's score, the evidence for it, and
+// whether the column's name matched the *role's own vocabulary*.
+//
+// That last flag is deliberately narrow. Matching a word from the user's
+// question is enough to rank one candidate above another, but it is not enough
+// to qualify a column for a role it does not look like: Chicago's crimes table
+// has fbi_code, and a question mentioning "type" reaches it through the
+// category synonyms, at which point a classification code is summed into a
+// total that looks like a real number and means nothing.
+func scoreColumnForRole(terms []string, c personal.Column, param Param) (score float64, reason string, roleMatched bool) {
 	name := tokeniseIdent(c.Name)
-	var score float64
-	var reason string
 
 	// Type evidence first: it either qualifies the column or rules it out.
 	switch {
@@ -302,7 +321,7 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (float64
 			// candidate — but a weak one that needs name evidence to win.
 			score += 0.5
 		} else {
-			return 0, ""
+			return 0, "", false
 		}
 	case param.Temporal:
 		if isTemporalType(c.Type) {
@@ -311,7 +330,7 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (float64
 		} else if isTextType(c.Type) {
 			score += 0.5
 		} else {
-			return 0, ""
+			return 0, "", false
 		}
 	default:
 		// Entity, category and group are all text-shaped.
@@ -327,6 +346,7 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (float64
 	if s, hit := scoreKeywords(name, roleKeywords[param.Role]); s > 0 {
 		score += s * 3
 		reason = fmt.Sprintf("its name looks like a %s (%q)", param.Role, hit)
+		roleMatched = true
 	}
 
 	// Name evidence against the user's own words, expanded through the civic
@@ -334,16 +354,25 @@ func scoreColumnForRole(terms []string, c personal.Column, param Param) (float64
 	if len(terms) > 0 {
 		if s, hit := scoreKeywords(expand(terms), name); s > 0 {
 			score += s * 2.5
-			reason = fmt.Sprintf("matched %q in your question", hit)
+			if !roleMatched {
+				reason = fmt.Sprintf("matched %q in your question", hit)
+			}
 		}
 	}
+
+	// Among candidates matching equally well, prefer the least qualified name.
+	// Chicago's building_permits carries building_fee_paid, zoning_fee_paid,
+	// subtotal_paid and total_fee; all of them match "fees", and what a person
+	// means by "the fees" is the unqualified total, not one component of it.
+	score -= 0.1 * float64(len(name))
+
 	if score <= 0 {
-		return 0, ""
+		return 0, "", false
 	}
 	if reason == "" {
 		reason = fmt.Sprintf("best remaining %s candidate", param.Role)
 	}
-	return score, reason
+	return score, reason, roleMatched
 }
 
 // warningsFor flags a question asking for something the chosen shape does not
