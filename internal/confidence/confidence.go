@@ -40,6 +40,16 @@
 // R is 54%, a count taken from that answer rests on 54% of the records the
 // portal holds. That sentence is the whole interpretation.
 //
+// For one dataset that reading is exact — R is U/E. For a query reading
+// several, R is their product, which reads "every dataset held up" rather than
+// "this share of the pooled records held up". The two differ: two datasets each
+// retaining half give R = 25%, while half of the pooled records survived. The
+// conjunctive reading is exact for a join, where a row needs every side to be
+// usable, and is a lower bound for a union. It is the conservative of the two,
+// which is the right direction for a number whose purpose is to stop someone
+// over-claiming. Callers presenting R for a multi-dataset query should say
+// "every dataset behind this answer", not "this share of the records".
+//
 // An earlier version of this package scored eight checks using hand-chosen
 // severity floors and saturation points — about twenty constants, each
 // defensible alone and none of them derived. Six of the eight turned out to be

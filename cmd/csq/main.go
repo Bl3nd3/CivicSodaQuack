@@ -34,6 +34,7 @@ Usage:
   csq snapshot-index update --index <path> --add <tarball> --url <url> [--max-keep N]
   csq snapshot-index validate --index <path>
   csq modes    [show|init|run] <mode> [options]
+  csq investigate "<question>" --db <portal.duckdb> [--working] [--sql] [--json]
   csq query    --db <portal.duckdb> [--db ...] [--format csv|json|parquet] <SQL>
   csq web      --db <portal.duckdb> [--db ...] [--config <yaml> ...] [--addr ADDR] [--open]
 
@@ -46,6 +47,14 @@ Modes — curated analysis profiles, ready to sync and query:
 
   Start with 'csq modes' to list them, or 'csq modes show <mode>' for the
   datasets, queries, and interpretation caveats each one carries.
+
+Investigations — ask a question, get a verdict and its working:
+  csq investigate "Is Chicago becoming less transparent about policing?" \
+      --db data.cityofchicago.org.duckdb
+
+  Seven steps in order — discover, plan, sync, validate, analyze, challenge,
+  explain. 'csq investigate --list --db <file>' shows which can run on your
+  data and what to sync for the rest.
 
 All subcommands except 'fetch' acquire <dbpath>.lock (advisory flock).
 Pass --no-lock to bypass or --lock-wait <duration> to retry.
@@ -115,6 +124,11 @@ func main() {
 	case "modes", "mode":
 		if err := runModes(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "csq modes: %v\n", err)
+			os.Exit(1)
+		}
+	case "investigate":
+		if err := runInvestigate(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "csq investigate: %v\n", err)
 			os.Exit(1)
 		}
 	case "query":
