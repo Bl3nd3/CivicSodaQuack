@@ -109,10 +109,25 @@ func Build(req BuildRequest) (*personal.Draft, error) {
 		City:   req.City,
 		Datasets: map[string]personal.DocDataset{
 			concept: {
-				ID:      firstNonEmpty(req.Table.DatasetID, "(local)"),
-				Table:   req.Table.Name,
-				Name:    firstNonEmpty(req.Table.DatasetName, req.Table.Name),
-				Rows:    req.Table.Rows,
+				ID:    firstNonEmpty(req.Table.DatasetID, "(local)"),
+				Table: req.Table.Name,
+				Name:  firstNonEmpty(req.Table.DatasetName, req.Table.Name),
+				// Rows is deliberately left unset.
+				//
+				// It is the reference count completeness is measured against —
+				// H/E, "did the rows arrive". The only count available here is
+				// req.Table.Rows, which DuckDB reports for the table already on
+				// disk. Writing it would set E to H, making completeness the
+				// ratio of the local copy to itself: a permanent "100% of
+				// expected rows present" that would read identically after a
+				// sync that truncated half the data. A check that cannot fail
+				// is worse than an absent one, because it is displayed with a
+				// tick beside it.
+				//
+				// Unset, confidence reports "expected row count unknown —
+				// completeness not checked", drops it from the product, and
+				// lowers coverage to say so. Anyone who knows the portal's real
+				// count can put it in the binding by hand and get the check.
 				Columns: cols,
 			},
 		},

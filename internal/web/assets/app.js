@@ -48,6 +48,13 @@ async function api(path, opts) {
 // returns them; a raw 8614139 in a table is a number nobody reads correctly.
 const fmt = new Intl.NumberFormat();
 
+// A binding that records no row count has an unknown size, not a zero one.
+// "~0 rows" reads as an empty dataset and promises an instant download;
+// generated bindings omit the count on purpose, so this is an ordinary case.
+function approxRows(n) {
+  return n > 0 ? `~${fmt.format(n)} rows` : 'size unknown';
+}
+
 // Mirrors formatNumber in chart.go. The two must agree: the same figure appears
 // in the live page and in the exported report, and a dollar total that reads
 // 12,486,464,619.2 in one and 12,486,464,619 in the other looks like two
@@ -243,7 +250,7 @@ function renderSetup(city = null) {
         el('span', {}, a.summary),
         el('div', { class: 'status', style: 'margin-top:8px; gap:8px; display:flex' },
           el('span', { class: 'badge' }, `${a.datasets} datasets`),
-          el('span', { class: 'badge' }, `~${fmt.format(a.approx_rows)} rows`),
+          el('span', { class: 'badge' }, approxRows(a.approx_rows)),
           el('span', { class: 'badge' }, a.approx_time))))),
     el('div', { id: 'jobpanel' }));
 }
@@ -254,7 +261,9 @@ function confirmSetup(city, a) {
   const panel = $('#jobpanel');
   mount(panel, el('div', { class: 'callout' },
     el('strong', {}, `Download ${a.datasets} datasets for ${city.city}?`),
-    `About ${fmt.format(a.approx_rows)} rows, roughly ${a.approx_time}. ` +
+    `${a.approx_rows > 0
+      ? `About ${fmt.format(a.approx_rows)} rows, roughly ${a.approx_time}.`
+      : 'The size of this download is not recorded, so it may take a while.'} ` +
     'You can stop it at any point, and anything already downloaded is kept.',
     el('div', { style: 'margin-top:10px; display:flex; gap:8px' },
       el('button', {

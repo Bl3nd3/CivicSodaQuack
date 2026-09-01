@@ -150,8 +150,8 @@ func showMode(args []string) error {
 			fmt.Fprintf(out, "  none yet — add one to internal/modes/ to support a city\n")
 		}
 		for _, b := range bindings {
-			fmt.Fprintf(out, "\n  %s  (%s)  ~%s rows\n",
-				b.Portal, b.City, withCommas(m.ApproxRowsFor(b)))
+			fmt.Fprintf(out, "\n  %s  (%s)  %s\n",
+				b.Portal, b.City, approxRowsPhrase(m.ApproxRowsFor(b)))
 			if b.Source != "" {
 				fmt.Fprintf(out, "      from: %s\n", b.Source)
 			}
@@ -256,8 +256,8 @@ func initMode(args []string) error {
 	if err := os.WriteFile(output, []byte(yaml), 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[csq] wrote %s — %s, %d datasets, ~%s rows\n",
-		output, b.Portal, len(b.Concepts), withCommas(m.ApproxRowsFor(b)))
+	fmt.Fprintf(os.Stderr, "[csq] wrote %s — %s, %d datasets, %s\n",
+		output, b.Portal, len(b.Concepts), approxRowsPhrase(m.ApproxRowsFor(b)))
 	if missing := m.Unbound(b); len(missing) > 0 {
 		fmt.Fprintf(os.Stderr, "[csq] note: %s does not publish %s; "+
 			"queries needing those will be skipped\n",
@@ -571,6 +571,19 @@ func wrapText(s string, width int) []string {
 		cur += " " + f
 	}
 	return append(lines, cur)
+}
+
+// approxRowsPhrase describes how much a binding will sync.
+//
+// A binding that records no row count has an unknown size, not a zero one.
+// "~0 rows" reads as an empty dataset and invites the reader to expect an
+// instant download; generated bindings omit the count deliberately, so this is
+// the ordinary case for a personal mode rather than an edge one.
+func approxRowsPhrase(n int64) string {
+	if n <= 0 {
+		return "size unknown"
+	}
+	return "~" + withCommas(n) + " rows"
 }
 
 // withCommas formats n with thousands separators.
