@@ -626,11 +626,23 @@ def line_chart(res, spec, marks, cid):
 def stat_tile(res, spec, marks):
     """One row, one number. A one-bar bar chart is not a chart."""
     label, values = marks[0]
-    v = values[0][1]
+    si, v = values[0]
+
+    # Name the series the number belongs to. A single-city figure that does not
+    # say which city reads as a total across all of them, which is the same
+    # failure the exclusions block exists to prevent.
+    sub = label
+    if spec["series"] >= 0 and si < len(spec["series_names"]):
+        sub = "%s · %s" % (label, spec["series_names"][si])
+
+    # Four digits stay whole — "1,200" is both clearer and no longer than
+    # "1.2K". Compacting earns its place only once the digits outrun the eye.
+    text = fmt_full(v) if abs(v) < 10000 else fmt_compact(v)
+
     return ('<div class="tile"><div class="tile-label">{}</div>'
             '<div class="tile-value">{}</div>'
             '<div class="tile-sub">{}</div></div>').format(
-        esc(res["columns"][spec["value"]]), esc(fmt_compact(v)), esc(label))
+        esc(res["columns"][spec["value"]]), esc(text), esc(sub))
 
 
 def legend(names):
@@ -769,8 +781,13 @@ def figure(res, opts, cid):
         body = bar_chart(res, spec, marks)
         note = ""
         if total > len(marks):
-            note = ("First {:,} of {:,} rows, in the result's own order."
-                    .format(len(marks), total))
+            # What was capped is label groups, not rows: a grouped chart draws
+            # one group from several rows, so calling them rows contradicts the
+            # row count on the table view directly below.
+            unit = ("rows" if spec["series"] < 0
+                    else "%s values" % res["columns"][spec["label"]])
+            note = ("First {:,} of {:,} {}, in the result's own order."
+                    .format(len(marks), total, unit))
 
     head.append('<p class="measure">Measure: <b>{}</b>{}</p>'.format(
         esc(res["columns"][spec["value"]]),
