@@ -571,6 +571,27 @@ Adding a city means adding a *binding* to the underlying mode. No investigation 
 
 Match terms name the **claim**, not the subject matter. Routing weights each term by how few investigations claim it — measured over the registry rather than chosen, so adding an investigation re-weights the vocabulary automatically — which means a bare topic word like "potholes" would score as though it were diagnostic and send "how many potholes will there be next year?" to an investigation answering a different question about the same noun. When two investigations match equally well, csq asks rather than guessing: guessing produces a confident, fully caveated verdict about the wrong question, and nothing in the output would look wrong.
 
+### Chart the JSON
+
+`scripts/csq-graph.py` turns csq's JSON into a self-contained HTML page of charts. It reads either JSON csq emits — a mode result from `/export/<mode>/<query>.json`, or the row objects from `csq query --format json` — and needs no dependencies, no toolchain, and no network: the page it writes is a single file with its own SVG and no third-party JavaScript.
+
+```bash
+./csq query --db data.cityofchicago.org.duckdb --format json \
+  "SELECT ward, COUNT(*) AS complaints FROM ... GROUP BY 1 ORDER BY 2 DESC" \
+  | python3 scripts/csq-graph.py - --open
+
+# or chart what the page exported
+python3 scripts/csq-graph.py ranking-per_capita.json corruption-vendors.json -o charts.html
+```
+
+The rules deciding *whether* a result is drawn are the ones `internal/web/chart.go` already applies: one text column to name the marks, one numeric column to size them, and a `city` column splits them into series. A result that meets none of them renders as a table with the reason printed above it — "3 text columns (dataset, column, problem), so there is no single thing the marks would name" — because a reader who sees no chart should not have to guess whether it is missing or was refused. `--label`, `--value` and `--series` override the choice when you know better; `--top` sets how many rows are drawn.
+
+Three properties are deliberate rather than incidental:
+
+- **Caveats travel with the figure.** The caveats, the excluded cities, the truncation flag and the confidence report render above every chart, and there is no code path that draws one without them — the same property the CSV and JSON exports hold, for the same reason.
+- **Every figure carries its table.** Not only as an accessibility fallback: the chart abbreviates a long number to `184.3M`, and the table and the hover tooltip are where the full `184,320,991` stays reachable.
+- **A chart it cannot draw honestly, it does not draw.** Several numeric columns of different units become one measure plus a table, never a dual-axis chart; more than eight series stays a table; and a line chart whose axis starts above zero says so under the chart.
+
 ### Serve via MCP
 
 ```bash
@@ -721,6 +742,7 @@ internal/analysis/    # Headless mode execution: planning, exclusions, readiness
 internal/confidence/  # Data-fitness scoring: dataset profiling, signals, caps
 internal/investigate/ # Investigations: routing, probes, challenges, verdicts
 internal/web/         # Browser UI: JSON API, embedded assets, HTML reports
+scripts/              # Standalone helpers: csq-graph.py charts exported JSON
 ```
 
 ## License
