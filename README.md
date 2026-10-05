@@ -592,6 +592,27 @@ Three properties are deliberate rather than incidental:
 - **Every figure carries its table.** Not only as an accessibility fallback: the chart abbreviates a long number to `184.3M`, and the table and the hover tooltip are where the full `184,320,991` stays reachable.
 - **A chart it cannot draw honestly, it does not draw.** Several numeric columns of different units become one measure plus a table, never a dual-axis chart; more than eight series stays a table; and a line chart whose axis starts above zero says so under the chart.
 
+#### Designed, not implemented: a livability index
+
+`ranking` deliberately emits no overall score, on the grounds that crime,
+service responsiveness, and construction do not add up to anything. The obvious
+follow-up — *can an honest composite be built at all?* — has a design in
+[docs/superpowers/specs/2026-08-28-livability-index-design.md](./docs/superpowers/specs/2026-08-28-livability-index-design.md).
+
+Its answer is to stop hiding the weighting and start measuring it. Report rank
+*intervals* over 10,000 sampled weightings instead of a point rank, and publish
+a point rank only where the interval collapses. Publish the dominance partial
+order separately, since those are the only claims that survive every weighting.
+Gate on affordability before scoring, so amenity cannot buy past a budget. And
+score each domain on its 10th-percentile neighbourhood as well as its median,
+because life expectancy varies by decades *within* Chicago (`qjr3-bm53`) — a
+wider spread than sits between most pairs of cities.
+
+Nothing in that document is built. It also concludes that roughly half of what
+makes a city livable — commute time, transit access, income mobility, school
+quality, childcare cost — is not on a Socrata portal at all, so an honest index
+would require csq to grow a non-Socrata reference-data path.
+
 ### Serve via MCP
 
 ```bash
