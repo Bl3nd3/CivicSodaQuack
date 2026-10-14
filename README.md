@@ -633,6 +633,14 @@ The fitting is the easy half. The script exists for the other half — a regress
 
 `--target` is required. Choosing it automatically would be choosing the question, and the script will not extrapolate beyond the observed range of any predictor.
 
+Because the statistics are implemented by hand rather than imported, they are checked rather than trusted:
+
+```bash
+python3 scripts/csq-predict-selftest.py
+```
+
+It verifies simple regression against the closed form, the t critical values against published tables, and the defining property of least squares (residuals orthogonal to every predictor); then plants a known relationship alongside a column of pure noise and reads the result back off the generated page — the planted coefficients must land inside their intervals, and the noise must be reported as undetermined. Exits non-zero if anything fails.
+
 ### Serve via MCP
 
 ```bash
