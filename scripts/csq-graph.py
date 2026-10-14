@@ -129,9 +129,14 @@ def from_result(doc, source):
 def from_records(records, source):
     """`csq query --format json` — an array of {column: value} objects.
 
-    Columns come from the order keys first appear, which is the SELECT order
-    for every record DuckDB produces. A key missing from a later record is a
-    null in that row, never a shorter row.
+    Columns come from the order the keys first appear, which is *not* the
+    SELECT order: csq builds each record as a map[string]any, and Go's JSON
+    encoder sorts map keys, so `SELECT sr_type, COUNT(*) AS requests` arrives
+    as requests-then-sr_type. Nothing here can recover the original order —
+    it is gone before the JSON is written — so the table view is alphabetical
+    while the chart, which picks columns by type and not by position, is
+    unaffected. A key missing from a later record is a null in that row,
+    never a shorter row.
     """
     cols = []
     for rec in records:
@@ -294,6 +299,13 @@ def pick_spec(res, opts):
                           % (len(text), names))
         label_col = text[0]
 
+    # Whatever names the marks cannot also size them. This only bites when
+    # --label picks a numeric column, which is exactly the case it exists for:
+    # a mode result carrying an integer `year` chose year as the measure too,
+    # because a sorted year column looks precisely like a sorted measure, and
+    # drew year against itself.
+    numeric = [i for i in numeric if i != label_col]
+
     value_col = find_column(cols, opts.value)
     if value_col < 0:
         if not numeric:
@@ -408,12 +420,20 @@ def nice_ticks(lo, hi, count=4):
         if raw <= mag * m:
             step = mag * m
             break
+    # The ticks define the scale, so they must span the data: the first at or
+    # below the minimum, the last at or above the maximum. Stopping half a step
+    # past the maximum — the obvious-looking guard — can leave the top tick
+    # below it, and then every value above that tick is drawn outside the plot
+    # rather than clamped. Chicago's crimes-by-year found this: a top tick of
+    # 250,000 against a 269,997 maximum silently dropped four years off the
+    # left of the line.
     start = math.floor(lo / step) * step
     ticks, v = [], start
-    while v <= hi + step * 0.5:
+    while True:
         ticks.append(round(v, 10))
+        if v >= hi - 1e-9:
+            return ticks
         v += step
-    return ticks
 
 
 # ------------------------------------------------------------------ marks
