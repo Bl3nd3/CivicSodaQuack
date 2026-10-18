@@ -321,7 +321,15 @@ def ols(x_rows, y):
             "hi": beta[i] + tcrit * se[i],
         })
 
-    fstat = ((tss - rss) / k) / sigma2 if k > 0 else float("nan")
+    # An exact fit leaves no residual variance to divide by. It is reachable
+    # with integer data — a rate against its own numerator, a total against
+    # its parts — which is precisely the case this tool is meant to catch, so
+    # crashing on it would be the worst possible response. F is infinite, its
+    # p-value undefined, and the R² > 0.999 notice does the real talking.
+    if sigma2 == 0:
+        fstat = float("inf")
+    else:
+        fstat = ((tss - rss) / k) / sigma2 if k > 0 else float("nan")
     return {
         "n": n, "k": k, "df": df, "r2": r2, "adj_r2": adj,
         "sigma": math.sqrt(sigma2), "coefs": coefs,
@@ -698,6 +706,31 @@ def read_the_model(target, names, model, vifs, counts_everywhere, unit):
             "its parts — in which case the model has recovered a definition "
             "rather than found anything." % (model["r2"], target))
 
+    # Concentration of the thing being explained. Greenwich 2016 was the case
+    # that forced this: five of 991 sales carried 89% of the variance, so the
+    # coefficients were a statement about five houses while the page reported
+    # p < 0.001 and said nothing. Measured against the target rather than via
+    # hat values, because "which rows is this fit actually about" is the
+    # question, and a share of variance answers it in one sentence.
+    y = [f + r for f, r in zip(model["fitted"], model["resid"])]
+    ybar = mean(y)
+    total = sum((v - ybar) ** 2 for v in y)
+    if total > 0:
+        top_n = max(3, int(math.ceil(0.01 * n)))
+        contrib = sorted(((v - ybar) ** 2 for v in y), reverse=True)[:top_n]
+        share = sum(contrib) / total
+        # Only worth saying when a small minority of rows dominates: a tenth of
+        # the rows holding a quarter of the variance is ordinary.
+        if top_n <= 0.10 * n and share >= 0.25:
+            limits.append(
+                "%d of the %d %s — %.0f%% of them — carry %.0f%% of the "
+                "variation in %s being explained. Every coefficient above is "
+                "mostly a statement about those %d rows; check them before "
+                "reading anything else, since one of them being wrong moves "
+                "the whole model."
+                % (top_n, n, unit, 100.0 * top_n / n, share * 100.0, target,
+                   top_n))
+
     worst = max(vifs) if vifs else 1.0
     if worst >= 10:
         bad = [names[i] for i, v in enumerate(vifs) if v >= 10]
@@ -714,12 +747,18 @@ def read_the_model(target, names, model, vifs, counts_everywhere, unit):
             "less stable than their intervals suggest." % worst)
 
     if counts_everywhere:
+        # What was measured is only that every value is a non-negative whole
+        # number. Dollar amounts pass that test too, so asserting these are
+        # counts over areas states a fact this code cannot know — and a
+        # warning that is sometimes plainly wrong teaches readers to skip the
+        # whole block. The detection stays; the claim becomes conditional.
         limits.append(
-            "Every variable here is a count over the same areas, so all of "
-            "them grow with the size of the area. A model like this mostly "
-            "rediscovers which areas are big. Normalise by population or area "
-            "first — per resident, per square mile — if the question is about "
-            "rates rather than totals.")
+            "Every variable here is a non-negative whole number. If these are "
+            "counts over the same areas — crimes, calls and permits per ward — "
+            "then all of them grow with the size of the area, the model mostly "
+            "rediscovers which areas are big, and you want rates: normalise per "
+            "resident or per square mile first. If they are amounts rather than "
+            "tallies, this does not apply.")
 
     if n < 10 * k:
         limits.append(

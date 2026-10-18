@@ -193,6 +193,65 @@ def test_planted_relationship():
           "https://" not in page)
 
 
+def test_leverage_warning():
+    """It must fire when a few rows dominate, and stay quiet when none do.
+
+    A warning that fires on everything is ignored, so both directions are
+    checked rather than just the positive case.
+    """
+    section("the leverage warning, in both directions")
+    tmp = tempfile.mkdtemp()
+
+    def page_for(rows):
+        path = os.path.join(tmp, "lev.json")
+        with open(path, "w") as fh:
+            json.dump(rows, fh)
+        out = os.path.join(tmp, "lev.html")
+        subprocess.run([sys.executable, TARGET, path, "--target", "y",
+                        "--label", "id", "-o", out],
+                       capture_output=True, text=True)
+        return open(out).read()
+
+    rng = random.Random(5)
+    even = [{"id": "r%03d" % i, "a": rng.uniform(0, 100), "y": 0.0}
+            for i in range(200)]
+    for r in even:
+        r["y"] = 10 + 2 * r["a"] + rng.gauss(0, 5)
+    check("quiet on evenly spread data", "carry" not in page_for(even))
+
+    # One sale a hundred times the size of the rest — the Greenwich shape.
+    skewed = list(even)
+    skewed[0] = dict(skewed[0], a=99.0, y=2_000_000.0)
+    skewed[1] = dict(skewed[1], a=98.0, y=1_500_000.0)
+    page = page_for(skewed)
+    check("fires when a few rows dominate the variance",
+          "carry" in page and "statement about those" in page)
+
+
+def test_counts_warning_is_conditional():
+    """The all-integers notice must not assert that the values are counts."""
+    section("the whole-number notice is hedged, not asserted")
+    tmp = tempfile.mkdtemp()
+    rows = [{"id": "r%03d" % i, "assessed": 100000 + i * 1000,
+             "price": 250000 + i * 2500} for i in range(40)]
+    path = os.path.join(tmp, "money.json")
+    with open(path, "w") as fh:
+        json.dump(rows, fh)
+    out = os.path.join(tmp, "money.html")
+    r = subprocess.run([sys.executable, TARGET, path, "--target", "price",
+                        "--label", "id", "-o", out], capture_output=True, text=True)
+    # This data fits exactly, which once divided by a zero residual variance.
+    check("an exactly-fitting model does not crash", r.returncode == 0,
+          r.stderr.strip().splitlines()[-1][:60] if r.returncode else "")
+    if r.returncode != 0:
+        return
+    page = open(out).read()
+    check("does not assert the values are counts",
+          "Every variable here is a count" not in page)
+    check("offers the rate advice conditionally",
+          "If these are counts" in page)
+
+
 def test_cli_refusals():
     section("bad input is refused with an accurate reason")
     tmp = tempfile.mkdtemp()
@@ -234,6 +293,8 @@ def main():
     test_orthogonality()
     test_refusals()
     test_planted_relationship()
+    test_leverage_warning()
+    test_counts_warning_is_conditional()
     test_cli_refusals()
     print()
     if FAILED:
