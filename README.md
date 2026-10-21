@@ -613,6 +613,35 @@ makes a city livable — commute time, transit access, income mobility, school
 quality, childcare cost — is not on a Socrata portal at all, so an honest index
 would require csq to grow a non-Socrata reference-data path.
 
+### Model several variables at once
+
+`scripts/csq-predict.py` takes the same JSON and fits an ordinary least squares model of one numeric column against the others, rendering it as a self-contained HTML page: the coefficients with their 95% intervals, a correlation matrix, observed against predicted, and the residuals. Standard library only — the t and F distributions are computed in the file rather than imported, so there is still nothing to install.
+
+```bash
+./csq query --db data.cityofchicago.org.duckdb --format json \
+  "SELECT community_area, COUNT(*) AS crimes, ... GROUP BY 1" \
+  | python3 scripts/csq-predict.py - --target crimes --unit "community areas"
+```
+
+The fitting is the easy half. The script exists for the other half — a regression over civic data will produce a confident-looking answer from almost any set of columns, and most of those answers are artefacts:
+
+- **A coefficient whose interval spans zero is reported as undetermined, never as a small effect.** It is drawn muted, on the far side of a zero line, and the sentence says "no association distinguishable from zero".
+- **Collinearity is measured, not assumed.** Variance inflation is computed per predictor; past 10 the output says the individual coefficients are arbitrary and should not be read one at a time, which is true however good R² looks.
+- **A handful of rows dominating the fit is flagged.** When a small minority of observations carries a large share of the variation being explained, every coefficient is really a statement about those few rows. Greenwich real-estate sales are the case: 10 of 991 carried 91% of it, while the page reported p < 0.001 and said nothing.
+- **Whole-number variables get a conditional note.** If they are counts over the same areas — ward crime, ward 311 calls, ward permits — they all grow with area size and the model mostly rediscovers which areas are big; normalise to rates first. The check can only see that the values are non-negative integers, which money also is, so it says that rather than asserting they are counts.
+- **A near-perfect fit is treated as a warning.** On observational data R² ≈ 1 almost always means the target was arithmetically derived from a predictor — a rate against its own numerator — so the model has recovered a definition rather than found anything.
+- **Caveats, exclusions and confidence from the underlying query render above the model**, as everywhere else, and the limits appear before the figures rather than beneath them.
+
+`--target` is required. Choosing it automatically would be choosing the question, and the script will not extrapolate beyond the observed range of any predictor.
+
+Because the statistics are implemented by hand rather than imported, they are checked rather than trusted:
+
+```bash
+python3 scripts/csq-predict-selftest.py
+```
+
+It verifies simple regression against the closed form, the t critical values against published tables, and the defining property of least squares (residuals orthogonal to every predictor); then plants a known relationship alongside a column of pure noise and reads the result back off the generated page — the planted coefficients must land inside their intervals, and the noise must be reported as undetermined. Exits non-zero if anything fails.
+
 ### Serve via MCP
 
 ```bash
@@ -763,7 +792,8 @@ internal/analysis/    # Headless mode execution: planning, exclusions, readiness
 internal/confidence/  # Data-fitness scoring: dataset profiling, signals, caps
 internal/investigate/ # Investigations: routing, probes, challenges, verdicts
 internal/web/         # Browser UI: JSON API, embedded assets, HTML reports
-scripts/              # Standalone helpers: csq-graph.py charts exported JSON
+scripts/              # Standalone helpers: csq-graph.py charts exported JSON;
+                      # csq-predict.py models several of its columns at once
 ```
 
 ## License
